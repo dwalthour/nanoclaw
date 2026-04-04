@@ -439,6 +439,9 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
+  let streamAccumulated = '';
+  let streamLastEmitTime = 0;
+  let streamLastEmitLen = 0;
   let messageCount = 0;
   let resultCount = 0;
 
@@ -501,6 +504,7 @@ async function runQuery(
         'NotebookEdit',
         'mcp__nanoclaw__*',
       ],
+      includePartialMessages: true,
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
@@ -524,18 +528,43 @@ async function runQuery(
     },
   })) {
     messageCount++;
-    const msgType =
-      message.type === 'system'
-        ? `system/${(message as { subtype?: string }).subtype}`
-        : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+    // Don't log stream_event messages — too noisy (one per token)
+    if (message.type !== 'stream_event') {
+      const msgType =
+        message.type === 'system'
+          ? `system/${(message as { subtype?: string }).subtype}`
+          : message.type;
+      log(`[msg #${messageCount}] type=${msgType}`);
+    }
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+      // Reset streaming accumulator for each new assistant turn
+      streamAccumulated = '';
+    }
 
-      // Note: We don't capture intermediate assistant messages here because
-      // they contain raw API content blocks (often empty text with tool_use).
-      // The actual user-visible response is captured from 'result' messages below.
+    // Stream partial text to user as it arrives from Claude
+    if (message.type === 'stream_event') {
+      const event = (message as { event: { type: string; delta?: { type?: string; text?: string } } }).event;
+      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
+        streamAccumulated += event.delta.text;
+        const now = Date.now();
+        if (
+          now - streamLastEmitTime >= 500 ||
+          streamAccumulated.length - streamLastEmitLen >= 50
+        ) {
+          if (streamAccumulated.length > streamLastEmitLen) {
+            writeOutput({
+              status: 'success',
+              result: streamAccumulated,
+              isPartial: true,
+              unifiedSessionId: unifiedSession.id,
+            });
+            streamLastEmitTime = now;
+            streamLastEmitLen = streamAccumulated.length;
+          }
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {

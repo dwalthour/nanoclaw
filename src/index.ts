@@ -321,8 +321,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      // Strip <internal>...</internal> blocks and model special tokens that leak through
+      const text = raw
+        .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+        .replace(/<\|(?:user|assistant|system|endoftext|im_start|im_end|end)[|>]*/g, '')
+        .trim();
       if (!text) return;
 
       if (result.isPartial) {
@@ -365,10 +368,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           await channel.sendMessage(chatJid, text);
         }
         outputSentToUser = true;
-        logger.info(
-          { group: group.name },
-          `Agent output: ${raw.length} chars`,
-        );
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         resetIdleTimer();
       }
     }
