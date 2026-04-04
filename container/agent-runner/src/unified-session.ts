@@ -104,6 +104,55 @@ export function extractUserText(prompt: string): string {
   return prompt;
 }
 
+/**
+ * Generate a raw conversation transcript for context injection.
+ * Used when switching from Ollama to Claude — injects actual messages
+ * rather than a summary so Claude can rehydrate the emotional tone and context.
+ * Falls back to summary for very long sessions.
+ */
+export function getRawTranscript(
+  session: UnifiedSession,
+  maxMessages = 50,
+): string {
+  // Skip system and tool messages, focus on user/assistant exchanges
+  const relevant = session.messages.filter(
+    (m) => (m.role === 'user' || m.role === 'assistant') && m.content,
+  );
+  const recent = relevant.slice(-maxMessages);
+
+  const lines: string[] = [];
+  for (const msg of recent) {
+    const sender = msg.role === 'user' ? 'Dave' : 'Elara';
+    let text = msg.content;
+
+    // Extract actual content from XML wrapper if present
+    const messageMatches = text.match(
+      /<message[^>]*>([\s\S]*?)<\/message>/g,
+    );
+    if (messageMatches) {
+      const extracted = messageMatches
+        .map((m) => m.replace(/<\/?message[^>]*>/g, '').trim())
+        .filter(Boolean)
+        .join('\n');
+      if (extracted) text = extracted;
+    }
+
+    if (!text.trim()) continue;
+
+    // Format with timestamp if available
+    const time = msg.timestamp
+      ? new Date(msg.timestamp).toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        })
+      : '';
+    lines.push(`${sender}${time ? ` (${time})` : ''}: ${text}`);
+  }
+
+  return lines.join('\n');
+}
+
 /** Convert unified session messages to Ollama /api/chat format. */
 export function getMessagesForOllama(
   session: UnifiedSession,

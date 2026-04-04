@@ -321,9 +321,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks and model special tokens that leak through
+      // Strip <internal>...</internal> blocks (closed or unclosed) and model special tokens
       const text = raw
         .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+        .replace(/<internal>[\s\S]*$/g, '')
         .replace(
           /<\|(?:user|assistant|system|endoftext|im_start|im_end|end)[|>]*/g,
           '',

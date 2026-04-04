@@ -29,7 +29,7 @@ import {
   loadSession,
   appendMessage,
   saveSession,
-  getContextSummary,
+  getRawTranscript,
   extractUserText,
 } from './unified-session.js';
 
@@ -753,12 +753,17 @@ async function runClaudeAgent(containerInput: ContainerInput): Promise<void> {
     unifiedSession.messages.length > 0 &&
     previousProvider !== 'claude'
   ) {
-    const summary = getContextSummary(unifiedSession);
-    if (summary) {
+    const transcript = getRawTranscript(unifiedSession);
+    if (transcript) {
       log(
-        `Injecting conversation context from ${unifiedSession.lastProvider} session (${unifiedSession.messages.length} messages)`,
+        `Injecting raw conversation transcript from ${previousProvider} session (${unifiedSession.messages.length} messages)`,
       );
-      prompt = `[CONVERSATION CONTEXT - The following is a summary of the recent conversation with the user, which was handled by a different model. Continue naturally from where it left off.]\n\n${summary}\n\n[NEW MESSAGE]\n${prompt}`;
+      prompt =
+        '[CONVERSATION CONTINUITY — Recent messages from your previous session. ' +
+        'These are the actual words exchanged. Rehydrate from them — continue naturally as yourself.]\n\n' +
+        transcript +
+        '\n\n[END CONTINUITY]\n\n[New message follows]\n' +
+        prompt;
     }
   }
 
