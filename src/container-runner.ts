@@ -55,6 +55,8 @@ export interface ContainerOutput {
   newSessionId?: string;
   unifiedSessionId?: string;
   error?: string;
+  isPartial?: boolean;
+  isTooling?: boolean;
 }
 
 interface VolumeMount {
@@ -207,13 +209,18 @@ function buildVolumeMounts(
     'agent-runner-src',
   );
   if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
+    // Check if any source file is newer than the cached copy
     const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+    let newestSrcMtime = 0;
+    for (const file of fs.readdirSync(agentRunnerSrc)) {
+      const mtime = fs.statSync(path.join(agentRunnerSrc, file)).mtimeMs;
+      if (mtime > newestSrcMtime) newestSrcMtime = mtime;
+    }
+    const cachedMtime = fs.existsSync(cachedIndex)
+      ? fs.statSync(cachedIndex).mtimeMs
+      : 0;
     const needsCopy =
-      !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+      !fs.existsSync(groupAgentRunnerDir) || newestSrcMtime > cachedMtime;
     if (needsCopy) {
       fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
     }

@@ -64,7 +64,12 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, ContainerConfig, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  ContainerConfig,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -286,6 +291,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Streaming state for edit-in-place
+  let streamingMessageId: string | null = null;
+  let editDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingEditText: string | null = null;
+
+  const flushEdit = async () => {
+    if (pendingEditText && streamingMessageId && channel.editMessage) {
+      const text = pendingEditText;
+      pendingEditText = null;
+      await channel.editMessage(chatJid, streamingMessageId, text);
+    }
+  };
+
+  const debouncedEdit = (text: string) => {
+    pendingEditText = text;
+    if (!editDebounceTimer) {
+      editDebounceTimer = setTimeout(async () => {
+        editDebounceTimer = null;
+        await flushEdit();
+      }, 300);
+    }
+  };
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -295,16 +323,57 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
+      if (!text) return;
+
+      if (result.isPartial) {
+        // Streaming partial update
+        if (result.isTooling) {
+          // Tool execution starting — flush any pending edit, show status, reset for new message
+          if (editDebounceTimer) {
+            clearTimeout(editDebounceTimer);
+            editDebounceTimer = null;
+          }
+          if (streamingMessageId && channel.editMessage) {
+            await channel.editMessage(chatJid, streamingMessageId, text);
+          }
+          streamingMessageId = null;
+        } else if (streamingMessageId && channel.editMessage) {
+          // Edit existing message (debounced)
+          debouncedEdit(text);
+        } else if (channel.sendMessageReturningId) {
+          // First partial — send initial message and track its ID
+          streamingMessageId = await channel.sendMessageReturningId(
+            chatJid,
+            text,
+          );
+          outputSentToUser = true;
+        }
+        // Channels without editing: skip partials silently
+      } else {
+        // Final complete output
+        // Flush any pending debounced edit first
+        if (editDebounceTimer) {
+          clearTimeout(editDebounceTimer);
+          editDebounceTimer = null;
+        }
+        if (streamingMessageId && channel.editMessage) {
+          // Edit the streaming message one final time with complete text
+          await channel.editMessage(chatJid, streamingMessageId, text);
+          streamingMessageId = null;
+        } else {
+          // No streaming happened, or channel doesn't support it
+          await channel.sendMessage(chatJid, text);
+        }
         outputSentToUser = true;
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.length} chars`,
+        );
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    if (result.status === 'success' && !result.isPartial) {
       queue.notifyIdle(chatJid);
     }
 
@@ -660,9 +729,7 @@ async function main(): Promise<void> {
       ...group.containerConfig,
       modelProvider: provider,
       claudeModel:
-        provider === 'claude'
-          ? modelName
-          : group.containerConfig?.claudeModel,
+        provider === 'claude' ? modelName : group.containerConfig?.claudeModel,
       ollamaModel:
         provider === 'ollama'
           ? modelName || group.containerConfig?.ollamaModel || 'llama3.2'

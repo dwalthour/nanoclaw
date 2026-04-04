@@ -80,6 +80,30 @@ export function appendMessage(
   }
 }
 
+/**
+ * Extract plain user text from the XML-formatted prompt.
+ * NanoClaw wraps messages in: <context.../><messages><message sender="Name" time="...">text</message></messages>
+ * This extracts just the message content for clean session history.
+ */
+export function extractUserText(prompt: string): string {
+  const messageMatches = prompt.match(
+    /<message[^>]*>([\s\S]*?)<\/message>/g,
+  );
+  if (messageMatches && messageMatches.length > 0) {
+    const texts = messageMatches
+      .map((m) => {
+        const senderMatch = m.match(/sender="([^"]+)"/);
+        const content = m.replace(/<\/?message[^>]*>/g, '').trim();
+        const sender = senderMatch?.[1];
+        return sender ? `${sender}: ${content}` : content;
+      })
+      .filter(Boolean);
+    if (texts.length > 0) return texts.join('\n');
+  }
+  // If no XML found, return as-is (plain text prompt)
+  return prompt;
+}
+
 /** Convert unified session messages to Ollama /api/chat format. */
 export function getMessagesForOllama(
   session: UnifiedSession,
@@ -121,17 +145,50 @@ export function getMessagesForOllama(
   });
 }
 
-/** Generate a text summary of the session for context injection (e.g. when switching providers). */
-export function getContextSummary(session: UnifiedSession): string {
+/**
+ * Generate a text summary of the session for context injection when switching providers.
+ * Focuses on the most recent messages and extracts meaningful content from XML wrappers.
+ */
+export function getContextSummary(
+  session: UnifiedSession,
+  maxMessages = 30,
+): string {
   const lines: string[] = [];
-  for (const msg of session.messages) {
-    if (msg.role === 'system') continue;
-    if (msg.role === 'tool') continue;
+
+  // Focus on recent messages, skip system and tool messages
+  const relevant = session.messages.filter(
+    (m) => m.role !== 'system' && m.role !== 'tool' && m.content,
+  );
+  const recent = relevant.slice(-maxMessages);
+
+  for (const msg of recent) {
     const prefix = msg.role === 'user' ? 'User' : 'Assistant';
-    const text =
-      msg.content.length > 500
-        ? msg.content.slice(0, 500) + '...'
-        : msg.content;
+    let text = msg.content;
+
+    // Extract actual message content from XML-formatted chat context
+    // Format: <message sender="Name" time="...">actual content</message>
+    const messageMatches = text.match(
+      /<message[^>]*>([\s\S]*?)<\/message>/g,
+    );
+    if (messageMatches) {
+      const extracted = messageMatches
+        .map((m) => {
+          const content = m.replace(/<\/?message[^>]*>/g, '').trim();
+          return content;
+        })
+        .filter(Boolean)
+        .join('\n');
+      if (extracted) text = extracted;
+    }
+
+    // Skip empty messages
+    if (!text.trim()) continue;
+
+    // Truncate very long individual messages
+    if (text.length > 1000) {
+      text = text.slice(0, 1000) + '...';
+    }
+
     lines.push(`${prefix}: ${text}`);
   }
   return lines.join('\n\n');

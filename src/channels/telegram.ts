@@ -90,7 +90,10 @@ export class TelegramChannel implements Channel {
       const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
       const resp = await fetch(fileUrl);
       if (!resp.ok) {
-        logger.warn({ fileId, status: resp.status }, 'Telegram file download failed');
+        logger.warn(
+          { fileId, status: resp.status },
+          'Telegram file download failed',
+        );
         return null;
       }
 
@@ -395,6 +398,57 @@ export class TelegramChannel implements Channel {
       );
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+    }
+  }
+
+  async sendMessageReturningId(
+    jid: string,
+    text: string,
+  ): Promise<string | null> {
+    if (!this.bot) return null;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      let msg;
+      try {
+        msg = await this.bot.api.sendMessage(numericId, text, {
+          parse_mode: 'Markdown',
+        });
+      } catch {
+        msg = await this.bot.api.sendMessage(numericId, text);
+      }
+      return msg.message_id.toString();
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Telegram message');
+      return null;
+    }
+  }
+
+  async editMessage(
+    jid: string,
+    messageId: string,
+    text: string,
+  ): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      const msgId = parseInt(messageId, 10);
+      // Telegram has a 4096 char limit — truncate for edits
+      const truncated =
+        text.length > 4096 ? text.slice(0, 4090) + '\n...' : text;
+      try {
+        await this.bot.api.editMessageText(numericId, msgId, truncated, {
+          parse_mode: 'Markdown',
+        });
+      } catch {
+        // Fallback to plain text if Markdown fails (common mid-stream)
+        try {
+          await this.bot.api.editMessageText(numericId, msgId, truncated);
+        } catch {
+          // "message is not modified" or other edit errors — ignore
+        }
+      }
+    } catch {
+      // Silently ignore edit failures
     }
   }
 

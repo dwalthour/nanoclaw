@@ -27,6 +27,7 @@ import {
   appendMessage,
   saveSession,
   getMessagesForOllama,
+  extractUserText,
 } from './unified-session.js';
 import { TOOL_DEFINITIONS, OllamaToolDef, executeTool } from './tools.js';
 
@@ -161,6 +162,113 @@ async function callOllama(
   return (await response.json()) as OllamaChatResponse;
 }
 
+const STREAM_INTERVAL_MS = 500;
+const STREAM_MIN_CHARS = 50;
+
+async function callOllamaStreaming(
+  ollamaHost: string,
+  model: string,
+  messages: OllamaChatMessage[],
+  tools: OllamaToolDef[],
+  onPartial: (text: string) => void,
+): Promise<OllamaChatResponse> {
+  const url = `${ollamaHost}/api/chat`;
+  const body: Record<string, unknown> = {
+    model,
+    messages,
+    stream: true,
+  };
+  if (tools.length > 0) {
+    body.tools = tools;
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Ollama API error ${response.status}: ${text}`);
+  }
+
+  let accumulated = '';
+  let lastEmitTime = 0;
+  let lastEmitLen = 0;
+  let finalResponse: OllamaChatResponse | null = null;
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop()!;
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const chunk = JSON.parse(line);
+
+        // Capture tool_calls from any chunk (Ollama sends them in non-done chunks)
+        if (chunk.message?.tool_calls) {
+          if (!finalResponse) {
+            finalResponse = {
+              message: { role: 'assistant', content: accumulated, tool_calls: chunk.message.tool_calls },
+              done: true,
+              model,
+            };
+          } else {
+            finalResponse.message.tool_calls = chunk.message.tool_calls;
+          }
+        }
+
+        if (chunk.done) {
+          if (!finalResponse) {
+            finalResponse = chunk as OllamaChatResponse;
+          }
+          if (!finalResponse.message) {
+            finalResponse.message = { role: 'assistant', content: accumulated };
+          } else {
+            finalResponse.message.content = accumulated;
+          }
+        } else {
+          accumulated += chunk.message?.content || '';
+          const now = Date.now();
+          if (
+            accumulated.length - lastEmitLen >= STREAM_MIN_CHARS ||
+            now - lastEmitTime >= STREAM_INTERVAL_MS
+          ) {
+            if (accumulated.length > lastEmitLen) {
+              onPartial(accumulated);
+              lastEmitTime = now;
+              lastEmitLen = accumulated.length;
+            }
+          }
+        }
+      } catch {
+        // Skip malformed NDJSON lines
+      }
+    }
+  }
+
+  if (!finalResponse) {
+    // Stream ended without a done:true chunk — construct response from accumulated
+    finalResponse = {
+      message: { role: 'assistant', content: accumulated },
+      done: true,
+      model,
+    };
+  }
+
+  return finalResponse;
+}
+
 /**
  * Execute a single tool call, routing to either built-in tools or MCP.
  */
@@ -206,6 +314,8 @@ async function runAgenticLoop(
   session: UnifiedSession,
   allTools: OllamaToolDef[],
   mcpClient: Client | null,
+  onStreamPartial: (text: string) => void,
+  onTooling: () => void,
 ): Promise<string> {
   let rounds = 0;
 
@@ -214,11 +324,19 @@ async function runAgenticLoop(
     const messages = getMessagesForOllama(session) as OllamaChatMessage[];
 
     log(`Ollama call #${rounds} (${messages.length} messages, model: ${model})`);
-    const response = await callOllama(ollamaHost, model, messages, allTools);
+    const response = await callOllamaStreaming(
+      ollamaHost,
+      model,
+      messages,
+      allTools,
+      onStreamPartial,
+    );
     const assistantMsg = response.message;
 
     // Check for tool calls
     if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
+      // Signal that we're switching to tool execution
+      onTooling();
       // Append assistant message with tool calls to session
       appendMessage(session, {
         role: 'assistant',
@@ -348,24 +466,41 @@ export async function runOllamaAgent(
     while (true) {
       log(`Starting Ollama query (session: ${session.id})...`);
 
-      // Add user message to session
+      // Add user message to session (extract plain text from XML wrapper)
       appendMessage(session, {
         role: 'user',
-        content: prompt,
+        content: extractUserText(prompt),
         provider: 'ollama',
         model,
       });
 
-      // Run the agentic loop
+      // Run the agentic loop with streaming
       const result = await runAgenticLoop(
         ollamaHost,
         model,
         session,
         allTools,
         mcp?.client || null,
+        (partialText) => {
+          writeOutput({
+            status: 'success',
+            result: partialText,
+            isPartial: true,
+            unifiedSessionId: session.id,
+          });
+        },
+        () => {
+          writeOutput({
+            status: 'success',
+            result: 'Using tools...',
+            isPartial: true,
+            isTooling: true,
+            unifiedSessionId: session.id,
+          });
+        },
       );
 
-      // Save session and emit output
+      // Save session and emit final (non-partial) output
       saveSession(session);
       writeOutput({
         status: 'success',

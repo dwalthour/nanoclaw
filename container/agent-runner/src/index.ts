@@ -30,6 +30,7 @@ import {
   appendMessage,
   saveSession,
   getContextSummary,
+  extractUserText,
 } from './unified-session.js';
 
 export interface ContainerInput {
@@ -53,6 +54,8 @@ export interface ContainerOutput {
   newSessionId?: string;
   unifiedSessionId?: string;
   error?: string;
+  isPartial?: boolean;
+  isTooling?: boolean;
 }
 
 interface SessionEntry {
@@ -400,10 +403,10 @@ async function runQuery(
   const stream = new MessageStream();
   stream.push(prompt);
 
-  // Write user message to unified session
+  // Write user message to unified session (extract plain text from XML wrapper)
   appendMessage(unifiedSession, {
     role: 'user',
-    content: prompt,
+    content: extractUserText(prompt),
     provider: 'claude',
   });
 
@@ -426,7 +429,7 @@ async function runQuery(
       // Also write piped IPC messages to unified session
       appendMessage(unifiedSession, {
         role: 'user',
-        content: text,
+        content: extractUserText(text),
         provider: 'claude',
       });
     }
@@ -530,38 +533,9 @@ async function runQuery(
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
 
-      // Write assistant message to unified session
-      const assistantMsg = message as {
-        uuid: string;
-        message?: {
-          content?: Array<{
-            type: string;
-            text?: string;
-            id?: string;
-            name?: string;
-            input?: Record<string, unknown>;
-          }>;
-        };
-      };
-      const content = assistantMsg.message?.content;
-      if (content) {
-        const textParts = content
-          .filter((c) => c.type === 'text')
-          .map((c) => c.text || '');
-        const toolCalls = content
-          .filter((c) => c.type === 'tool_use')
-          .map((c) => ({
-            id: c.id || '',
-            name: c.name || '',
-            arguments: (c.input as Record<string, unknown>) || {},
-          }));
-        appendMessage(unifiedSession, {
-          role: 'assistant',
-          content: textParts.join(''),
-          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-          provider: 'claude',
-        });
-      }
+      // Note: We don't capture intermediate assistant messages here because
+      // they contain raw API content blocks (often empty text with tool_use).
+      // The actual user-visible response is captured from 'result' messages below.
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -590,6 +564,18 @@ async function runQuery(
       log(
         `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
       );
+
+      // Capture the final result text in the unified session — this is the
+      // actual response sent to the user, not the intermediate assistant messages.
+      if (textResult) {
+        appendMessage(unifiedSession, {
+          role: 'assistant',
+          content: textResult,
+          provider: 'claude',
+        });
+        saveSession(unifiedSession);
+      }
+
       writeOutput({
         status: 'success',
         result: textResult || null,
