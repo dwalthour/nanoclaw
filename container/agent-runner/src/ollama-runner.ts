@@ -41,6 +41,7 @@ interface OllamaChatMessage {
   content: string;
   tool_calls?: OllamaToolCall[];
   tool_call_id?: string;
+  images?: string[]; // base64-encoded images for vision models
 }
 
 interface OllamaToolCall {
@@ -133,6 +134,43 @@ function loadSystemPrompt(_isMain: boolean): string {
   );
 
   return parts.join('\n\n');
+}
+
+/**
+ * Scan messages for image file paths and encode them as base64 for Ollama vision.
+ * Images are referenced in user messages as [Photo] (/workspace/group/attachments/file.jpg)
+ */
+function injectVisionImages(
+  messages: OllamaChatMessage[],
+): OllamaChatMessage[] {
+  const imagePathRegex =
+    /\[Photo\]\s*\(([^)]+\.(?:jpg|jpeg|png|gif|webp))\)/gi;
+
+  return messages.map((msg) => {
+    if (msg.role !== 'user') return msg;
+
+    const matches = [...msg.content.matchAll(imagePathRegex)];
+    if (matches.length === 0) return msg;
+
+    const images: string[] = [];
+    for (const match of matches) {
+      const filePath = match[1];
+      try {
+        if (fs.existsSync(filePath)) {
+          const data = fs.readFileSync(filePath);
+          images.push(data.toString('base64'));
+          log(`Encoded image for vision: ${filePath} (${data.length} bytes)`);
+        }
+      } catch (err) {
+        log(
+          `Failed to read image ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    if (images.length === 0) return msg;
+    return { ...msg, images };
+  });
 }
 
 async function callOllama(
@@ -439,7 +477,10 @@ async function runAgenticLoop(
       );
     }
 
-    const messages = getMessagesForOllama(session) as OllamaChatMessage[];
+    let messages = getMessagesForOllama(session) as OllamaChatMessage[];
+
+    // Inject base64-encoded images for vision-capable models
+    messages = injectVisionImages(messages);
 
     log(`Ollama call #${rounds} (${messages.length} messages, model: ${model})`);
     const response = await callOllamaStreaming(

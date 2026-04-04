@@ -45,6 +45,12 @@ export interface RegisteredGroup {
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
 }
 
+export interface MessageAttachment {
+  type: 'image' | 'video' | 'audio' | 'document';
+  path: string; // Container-relative path (e.g. /workspace/group/attachments/photo.jpg)
+  mimeType?: string;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
@@ -58,6 +64,7 @@ export interface NewMessage {
   reply_to_message_id?: string;
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
+  attachments?: MessageAttachment[];
 }
 
 export interface ScheduledTask {

@@ -263,7 +263,14 @@ export class TelegramChannel implements Channel {
         isGroup,
       );
 
-      const deliver = (content: string) => {
+      const deliver = (
+        content: string,
+        attachments?: Array<{
+          type: 'image' | 'video' | 'audio' | 'document';
+          path: string;
+          mimeType?: string;
+        }>,
+      ) => {
         this.opts.onMessage(chatJid, {
           id: ctx.message.message_id.toString(),
           chat_jid: chatJid,
@@ -272,7 +279,17 @@ export class TelegramChannel implements Channel {
           content,
           timestamp,
           is_from_me: false,
+          attachments,
         });
+      };
+
+      // Map placeholder to attachment type
+      const attachmentType = (ph: string) => {
+        if (ph.includes('Photo')) return 'image' as const;
+        if (ph.includes('Video')) return 'video' as const;
+        if (ph.includes('Voice') || ph.includes('Audio'))
+          return 'audio' as const;
+        return 'document' as const;
       };
 
       // If we have a file_id, attempt to download; deliver asynchronously
@@ -284,7 +301,9 @@ export class TelegramChannel implements Channel {
         this.downloadFile(opts.fileId, group.folder, filename).then(
           (filePath) => {
             if (filePath) {
-              deliver(`${placeholder} (${filePath})${caption}`);
+              deliver(`${placeholder} (${filePath})${caption}`, [
+                { type: attachmentType(placeholder), path: filePath },
+              ]);
             } else {
               deliver(`${placeholder}${caption}`);
             }
