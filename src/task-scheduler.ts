@@ -267,8 +267,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
-  // Track last heartbeat time per group
+  // Track last heartbeat time per group (init to now so we don't fire on startup)
   const lastHeartbeat: Record<string, number> = {};
+  const startupTime = Date.now();
 
   const checkHeartbeats = async () => {
     const groups = deps.registeredGroups();
@@ -277,7 +278,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       if (!fs.existsSync(heartbeatPath)) continue;
 
       const now = Date.now();
-      const lastBeat = lastHeartbeat[group.folder] || 0;
+      const lastBeat = lastHeartbeat[group.folder] || startupTime;
       if (now - lastBeat < HEARTBEAT_INTERVAL) continue;
 
       lastHeartbeat[group.folder] = now;
@@ -299,6 +300,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         const isMain = group.isMain === true;
 
         deps.queue.enqueueTask(jid, `heartbeat-${group.folder}`, async () => {
+          // Close the container promptly after heartbeat completes
+          // so it doesn't block normal message processing.
+          const HEARTBEAT_CLOSE_DELAY_MS = 5000;
+          let heartbeatCloseTimer: ReturnType<typeof setTimeout> | null =
+            null;
+
           const output = await runContainerAgent(
             group,
             {
@@ -307,6 +314,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
               groupFolder: group.folder,
               chatJid: jid,
               isMain,
+              isScheduledTask: true,
               assistantName: ASSISTANT_NAME,
               modelProvider: group.containerConfig?.modelProvider,
               claudeModel: group.containerConfig?.claudeModel,
@@ -315,18 +323,25 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
             },
             (proc, containerName) =>
               deps.onProcess(jid, proc, containerName, group.folder),
+            async (streamedOutput) => {
+              // Schedule close after first result
+              if (streamedOutput.result && !heartbeatCloseTimer) {
+                heartbeatCloseTimer = setTimeout(() => {
+                  deps.queue.closeStdin(jid);
+                }, HEARTBEAT_CLOSE_DELAY_MS);
+              }
+            },
           );
 
-          // Send any result to the chat
+          if (heartbeatCloseTimer) clearTimeout(heartbeatCloseTimer);
+
+          // Send any result to the chat (stripped of <internal> tags by host)
           if (output.result) {
             await deps.sendMessage(jid, output.result);
           }
         });
       } catch (err) {
-        logger.error(
-          { err, group: group.name },
-          'Error processing heartbeat',
-        );
+        logger.error({ err, group: group.name }, 'Error processing heartbeat');
       }
     }
   };
