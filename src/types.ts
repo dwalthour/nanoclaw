@@ -33,6 +33,7 @@ export interface ContainerConfig {
   modelProvider?: 'claude' | 'ollama'; // Default: 'claude'
   claudeModel?: string; // e.g. 'sonnet', 'opus', 'haiku', 'claude-opus-4-5'
   ollamaModel?: string; // e.g. 'glm-5:cloud', 'gemma4:31b'
+  showThinking?: boolean; // Show model thinking/reasoning layer (default: false)
 }
 
 export interface RegisteredGroup {

@@ -17,6 +17,7 @@ export interface UnifiedToolCall {
 export interface UnifiedMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  thinking?: string;
   toolCalls?: UnifiedToolCall[];
   toolCallId?: string;
   timestamp: string;

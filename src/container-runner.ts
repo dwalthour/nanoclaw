@@ -57,6 +57,7 @@ export interface ContainerOutput {
   error?: string;
   isPartial?: boolean;
   isTooling?: boolean;
+  thinking?: string;
 }
 
 interface VolumeMount {

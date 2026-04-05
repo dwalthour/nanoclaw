@@ -277,11 +277,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   const checkHeartbeats = async () => {
     const groups = deps.registeredGroups();
     for (const [jid, group] of Object.entries(groups)) {
-      const heartbeatPath = path.join(
-        GROUPS_DIR,
-        group.folder,
-        'HEARTBEAT.md',
-      );
+      const heartbeatPath = path.join(GROUPS_DIR, group.folder, 'HEARTBEAT.md');
       if (!fs.existsSync(heartbeatPath)) continue;
 
       const now = Date.now();
@@ -304,9 +300,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       lastHeartbeat[group.folder] = now;
 
       try {
-        const heartbeatContent = fs
-          .readFileSync(heartbeatPath, 'utf-8')
-          .trim();
+        const heartbeatContent = fs.readFileSync(heartbeatPath, 'utf-8').trim();
         if (!heartbeatContent) continue;
 
         const prompt = `[HEARTBEAT — This is an automated periodic check-in, not a user message.]\n\n${heartbeatContent}`;

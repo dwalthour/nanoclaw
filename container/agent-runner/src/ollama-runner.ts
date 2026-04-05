@@ -39,6 +39,7 @@ const MAX_TOOL_ROUNDS = 25;
 interface OllamaChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  thinking?: string;
   tool_calls?: OllamaToolCall[];
   tool_call_id?: string;
   images?: string[]; // base64-encoded images for vision models
@@ -184,6 +185,7 @@ async function callOllama(
     model,
     messages,
     stream: false,
+    think: true,
   };
   if (tools.length > 0) {
     body.tools = tools;
@@ -206,18 +208,24 @@ async function callOllama(
 const STREAM_INTERVAL_MS = 500;
 const STREAM_MIN_CHARS = 50;
 
+/** Build display text — content only. Thinking is sent separately in ContainerOutput. */
+function buildDisplay(thinking: string, content: string): string {
+  return content;
+}
+
 async function callOllamaStreaming(
   ollamaHost: string,
   model: string,
   messages: OllamaChatMessage[],
   tools: OllamaToolDef[],
-  onPartial: (text: string) => void,
+  onPartial: (text: string, thinking?: string) => void,
 ): Promise<OllamaChatResponse> {
   const url = `${ollamaHost}/api/chat`;
   const body: Record<string, unknown> = {
     model,
     messages,
     stream: true,
+    think: true,
   };
   if (tools.length > 0) {
     body.tools = tools;
@@ -235,8 +243,10 @@ async function callOllamaStreaming(
   }
 
   let accumulated = '';
+  let thinkingAccumulated = '';
   let lastEmitTime = 0;
   let lastEmitLen = 0;
+  let lastDisplayLen = 0;
   let finalResponse: OllamaChatResponse | null = null;
 
   const reader = response.body!.getReader();
@@ -256,7 +266,10 @@ async function callOllamaStreaming(
       try {
         const chunk = JSON.parse(line);
 
-        // Accumulate any content from this chunk (including tool_calls chunks)
+        // Accumulate thinking and content from this chunk
+        if (chunk.message?.thinking) {
+          thinkingAccumulated += chunk.message.thinking;
+        }
         if (chunk.message?.content) {
           accumulated += chunk.message.content;
         }
@@ -264,17 +277,23 @@ async function callOllamaStreaming(
         // Capture tool_calls from any chunk (Ollama sends them in non-done chunks)
         if (chunk.message?.tool_calls) {
           // Emit final partial with all accumulated text before tool execution
-          if (accumulated.length > lastEmitLen) {
-            onPartial(accumulated);
+          if (accumulated.length > lastDisplayLen || thinkingAccumulated) {
+            onPartial(accumulated, thinkingAccumulated || undefined);
           }
           if (!finalResponse) {
             finalResponse = {
-              message: { role: 'assistant', content: accumulated, tool_calls: chunk.message.tool_calls },
+              message: {
+                role: 'assistant',
+                content: accumulated,
+                thinking: thinkingAccumulated || undefined,
+                tool_calls: chunk.message.tool_calls,
+              },
               done: true,
               model,
             };
           } else {
             finalResponse.message.content = accumulated;
+            finalResponse.message.thinking = thinkingAccumulated || undefined;
             finalResponse.message.tool_calls = chunk.message.tool_calls;
           }
         }
@@ -284,9 +303,14 @@ async function callOllamaStreaming(
             finalResponse = chunk as OllamaChatResponse;
           }
           if (!finalResponse.message) {
-            finalResponse.message = { role: 'assistant', content: accumulated };
+            finalResponse.message = {
+              role: 'assistant',
+              content: accumulated,
+              thinking: thinkingAccumulated || undefined,
+            };
           } else {
             finalResponse.message.content = accumulated;
+            finalResponse.message.thinking = thinkingAccumulated || undefined;
           }
           // Log actual token usage for calibrating estimates
           if (chunk.prompt_eval_count) {
@@ -295,16 +319,17 @@ async function callOllamaStreaming(
             );
           }
         } else {
-          // Content already accumulated above — just handle partial emission
+          // Handle partial emission
+          const totalLen = accumulated.length + thinkingAccumulated.length;
           const now = Date.now();
           if (
-            accumulated.length - lastEmitLen >= STREAM_MIN_CHARS ||
+            totalLen - lastDisplayLen >= STREAM_MIN_CHARS ||
             now - lastEmitTime >= STREAM_INTERVAL_MS
           ) {
-            if (accumulated.length > lastEmitLen) {
-              onPartial(accumulated);
+            if (totalLen > lastDisplayLen) {
+              onPartial(accumulated, thinkingAccumulated || undefined);
               lastEmitTime = now;
-              lastEmitLen = accumulated.length;
+              lastDisplayLen = totalLen;
             }
           }
         }
@@ -433,7 +458,7 @@ async function selfCompact(
     999_999, // no context limit for the compaction call itself
   );
 
-  return summary;
+  return summary.text;
 }
 
 /**
@@ -446,10 +471,10 @@ async function runAgenticLoop(
   session: UnifiedSession,
   allTools: OllamaToolDef[],
   mcpClient: Client | null,
-  onStreamPartial: (text: string) => void,
+  onStreamPartial: (text: string, thinking?: string) => void,
   onTooling: (toolName: string, argSummary: string) => void,
   contextWindowSize = 128_000,
-): Promise<string> {
+): Promise<{ text: string; thinking?: string }> {
   let rounds = 0;
 
   while (rounds < MAX_TOOL_ROUNDS) {
@@ -508,6 +533,7 @@ async function runAgenticLoop(
       appendMessage(session, {
         role: 'assistant',
         content: assistantMsg.content || '',
+        thinking: assistantMsg.thinking || undefined,
         toolCalls: assistantMsg.tool_calls.map((tc) => ({
           id: tc.id || `call-${rounds}-${Math.random().toString(36).slice(2, 8)}`,
           name: tc.function.name,
@@ -560,11 +586,12 @@ async function runAgenticLoop(
     appendMessage(session, {
       role: 'assistant',
       content: text,
+      thinking: assistantMsg.thinking || undefined,
       provider: 'ollama',
       model,
     });
 
-    return text;
+    return { text, thinking: assistantMsg.thinking || undefined };
   }
 
   // Safety cap reached
@@ -576,7 +603,7 @@ async function runAgenticLoop(
     provider: 'ollama',
     model,
   });
-  return msg;
+  return { text: msg };
 }
 
 export async function runOllamaAgent(
@@ -700,11 +727,12 @@ export async function runOllamaAgent(
         session,
         allTools,
         mcp?.client || null,
-        (partialText) => {
+        (partialText, thinking) => {
           writeOutput({
             status: 'success',
             result: partialText,
             isPartial: true,
+            thinking,
             unifiedSessionId: session.id,
           });
         },
@@ -724,7 +752,8 @@ export async function runOllamaAgent(
       saveSession(session);
       writeOutput({
         status: 'success',
-        result,
+        result: result.text,
+        thinking: result.thinking,
         unifiedSessionId: session.id,
       });
 

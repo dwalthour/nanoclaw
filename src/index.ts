@@ -339,7 +339,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ? result.result
           : JSON.stringify(result.result);
       // Strip model artifacts — special tokens always, unclosed <internal> only on final output
-      const text = stripModelArtifacts(raw, !result.isPartial);
+      let text = stripModelArtifacts(raw, !result.isPartial);
+
+      // Prepend thinking layer if enabled and present
+      if (result.thinking && group.containerConfig?.showThinking) {
+        text = text
+          ? `_${result.thinking}_\n\n${text}`
+          : `_${result.thinking}_`;
+      }
+
       if (!text) return;
 
       if (result.isPartial) {
@@ -728,7 +736,46 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Handle /remote-control and /remote-control-end commands
+  async function handleThinkToggle(
+    command: string,
+    chatJid: string,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const arg = command.trim().split(/\s+/)[1]?.toLowerCase();
+
+    if (arg !== 'on' && arg !== 'off') {
+      const current = group.containerConfig?.showThinking ? 'on' : 'off';
+      await channel.sendMessage(
+        chatJid,
+        `Thinking display: ${current}\nUsage: /think on  or  /think off`,
+      );
+      return;
+    }
+
+    const showThinking = arg === 'on';
+    const updatedConfig: ContainerConfig = {
+      ...group.containerConfig,
+      showThinking,
+    };
+    group.containerConfig = updatedConfig;
+    setRegisteredGroup(chatJid, group);
+
+    await channel.sendMessage(
+      chatJid,
+      `Thinking display: ${arg}`,
+    );
+
+    logger.info(
+      { chatJid, showThinking, group: group.name },
+      'Thinking display toggled',
+    );
+  }
+
   async function handleModelSwitch(
     command: string,
     chatJid: string,
@@ -857,6 +904,12 @@ async function main(): Promise<void> {
       if (/^\/model\s/i.test(trimmed) || trimmed === '/model') {
         handleModelSwitch(trimmed, chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Model switch command error'),
+        );
+        return;
+      }
+      if (/^\/think\s/i.test(trimmed) || trimmed === '/think') {
+        handleThinkToggle(trimmed, chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Think toggle error'),
         );
         return;
       }
