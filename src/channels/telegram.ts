@@ -471,6 +471,24 @@ export class TelegramChannel implements Channel {
     }
   }
 
+  async sendImage(
+    jid: string,
+    imagePath: string,
+    caption?: string,
+  ): Promise<void> {
+    if (!this.bot) return;
+    try {
+      const numericId = jid.replace(/^tg:/, '');
+      const { InputFile } = await import('grammy');
+      await this.bot.api.sendPhoto(numericId, new InputFile(imagePath), {
+        caption,
+      });
+      logger.info({ jid, imagePath }, 'Telegram image sent');
+    } catch (err) {
+      logger.error({ jid, imagePath, err }, 'Failed to send Telegram image');
+    }
+  }
+
   isConnected(): boolean {
     return this.bot !== null;
   }

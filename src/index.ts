@@ -846,8 +846,7 @@ async function main(): Promise<void> {
     // Validate Ollama model exists before switching
     if (provider === 'ollama' && modelName) {
       try {
-        const ollamaHost =
-          process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
+        const ollamaHost = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
         const resp = await fetch(`${ollamaHost}/api/tags`);
         if (resp.ok) {
           const data = (await resp.json()) as {
@@ -1060,6 +1059,18 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendImage: async (jid, imagePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendImage) {
+        await channel.sendImage(jid, imagePath, caption);
+      } else {
+        await channel.sendMessage(
+          jid,
+          caption ? `[Image: ${imagePath}] ${caption}` : `[Image: ${imagePath}]`,
+        );
+      }
     },
     registeredGroups: () => registeredGroups,
     registerGroup,
