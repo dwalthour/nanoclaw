@@ -355,6 +355,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (result.isPartial) {
         // Streaming partial update
         if (result.isTooling) {
+          // Skip display for communication tools — the user sees the result directly
+          const hiddenTools = ['send_message', 'send_image'];
+          if (hiddenTools.some((t) => text.includes(t))) {
+            return;
+          }
           // Tool execution — finalize current streaming text + append tool info.
           if (editDebounceTimer) {
             clearTimeout(editDebounceTimer);
