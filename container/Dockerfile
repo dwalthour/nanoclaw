@@ -35,6 +35,11 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
+    python3-dev \
+    python3-cffi \
+    libffi-dev \
+    libssl-dev \
+    build-essential \
     jq \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
