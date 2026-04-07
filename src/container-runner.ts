@@ -16,8 +16,13 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
+
+// Read GitHub token from .env once at startup. Used by the agent to clone
+// the repo and open PRs from inside her container.
+const GH_TOKEN = readEnvFile(['GH_TOKEN']).GH_TOKEN || '';
 import {
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
@@ -291,6 +296,18 @@ async function buildContainerArgs(
 
   // GPU passthrough for image generation and local inference
   args.push('--gpus', 'all');
+
+  // GitHub credentials and git identity for the agent. The agent uses these
+  // to clone the NanoClaw repo, push branches, and open PRs from inside the
+  // container. Token is scoped to a single repo (dwalthour/nanoclaw).
+  if (GH_TOKEN) {
+    args.push('-e', `GH_TOKEN=${GH_TOKEN}`);
+    args.push('-e', `GITHUB_TOKEN=${GH_TOKEN}`);
+  }
+  args.push('-e', 'GIT_AUTHOR_NAME=NanoElara');
+  args.push('-e', 'GIT_AUTHOR_EMAIL=nanoelara@users.noreply.github.com');
+  args.push('-e', 'GIT_COMMITTER_NAME=NanoElara');
+  args.push('-e', 'GIT_COMMITTER_EMAIL=nanoelara@users.noreply.github.com');
 
   // Run as host user so bind-mounted files are accessible.
   // Skip when running as root (uid 0), as the container's node user (uid 1000),
