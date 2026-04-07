@@ -46,6 +46,7 @@ export interface ContainerInput {
   claudeModel?: string;
   ollamaModel?: string;
   unifiedSessionId?: string;
+  forceCompact?: boolean;
 }
 
 export interface ContainerOutput {

@@ -87,6 +87,8 @@ let unifiedSessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 // Pending model switch notification to inject into the next prompt
 const pendingModelNotification: Record<string, string> = {};
+// Groups that should force compaction on their next agent run
+const pendingForceCompact: Set<string> = new Set();
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
@@ -539,6 +541,12 @@ async function runAgent(
     delete pendingModelNotification[chatJid];
   }
 
+  // Consume the force-compact flag if set
+  const forceCompact = pendingForceCompact.has(chatJid);
+  if (forceCompact) {
+    pendingForceCompact.delete(chatJid);
+  }
+
   try {
     const output = await runContainerAgent(
       group,
@@ -553,6 +561,7 @@ async function runAgent(
         claudeModel: group.containerConfig?.claudeModel,
         ollamaModel: group.containerConfig?.ollamaModel,
         unifiedSessionId: unifiedSessions[group.folder],
+        forceCompact,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -794,6 +803,153 @@ async function main(): Promise<void> {
     );
   }
 
+  async function handleContextReport(chatJid: string): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    // Find the most recent unified session file for this group
+    const sessionsDir = path.join(GROUPS_DIR, group.folder, '.sessions');
+    let estimatedTokens = 0;
+    let messageCount = 0;
+    let sessionId = 'none';
+    let lastProvider = 'unknown';
+
+    try {
+      if (fs.existsSync(sessionsDir)) {
+        const files = fs
+          .readdirSync(sessionsDir)
+          .filter((f) => f.endsWith('.json'))
+          .map((f) => ({
+            name: f,
+            mtime: fs.statSync(path.join(sessionsDir, f)).mtimeMs,
+          }))
+          .sort((a, b) => b.mtime - a.mtime);
+
+        if (files.length > 0) {
+          const latest = files[0].name;
+          const session = JSON.parse(
+            fs.readFileSync(path.join(sessionsDir, latest), 'utf-8'),
+          );
+          sessionId = session.id || latest.replace('.json', '');
+          lastProvider = session.lastProvider || 'unknown';
+          messageCount = session.messages?.length || 0;
+
+          // Estimate tokens: ~4 chars per token (matches container-side estimate)
+          let chars = 0;
+          for (const m of session.messages || []) {
+            chars += (m.content || '').length;
+            if (m.thinking) chars += m.thinking.length;
+            if (m.toolCalls) chars += JSON.stringify(m.toolCalls).length;
+          }
+          estimatedTokens = Math.ceil(chars / 4);
+        }
+      }
+    } catch (err) {
+      logger.error({ err, chatJid }, 'Failed to read session for context report');
+    }
+
+    // Try to detect the model's effective context window
+    let contextWindow = 0;
+    let contextSource = '';
+    const provider = group.containerConfig?.modelProvider || 'claude';
+    if (provider === 'ollama') {
+      const model = group.containerConfig?.ollamaModel || 'unknown';
+      try {
+        const ollamaHost =
+          process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
+        const resp = await fetch(`${ollamaHost}/api/show`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: model }),
+        });
+        if (resp.ok) {
+          const info = (await resp.json()) as {
+            model_info?: Record<string, unknown>;
+          };
+          if (info.model_info) {
+            for (const [key, value] of Object.entries(info.model_info)) {
+              if (
+                key.endsWith('.context_length') &&
+                typeof value === 'number'
+              ) {
+                contextWindow = value;
+                break;
+              }
+            }
+          }
+        }
+        // Cloud models capped at 131072
+        if (model.endsWith(':cloud') && contextWindow > 131072) {
+          contextWindow = 131072;
+          contextSource = ' (capped for cloud)';
+        }
+      } catch {
+        contextWindow = 131072;
+        contextSource = ' (default — could not query)';
+      }
+    } else {
+      // Claude — best-effort defaults
+      const claudeModel = group.containerConfig?.claudeModel || 'sonnet';
+      contextWindow = claudeModel.includes('opus') ? 1_000_000 : 200_000;
+      contextSource = ' (model default)';
+    }
+
+    const pct =
+      contextWindow > 0
+        ? Math.round((estimatedTokens / contextWindow) * 100)
+        : 0;
+    const compactionThreshold = Math.round(contextWindow * 0.8);
+    const willCompactSoon = estimatedTokens > compactionThreshold;
+
+    const lines = [
+      `Context report:`,
+      `  Provider: ${provider}`,
+      `  Messages: ${messageCount}`,
+      `  Estimated tokens: ${estimatedTokens.toLocaleString()}`,
+      `  Context window: ${contextWindow.toLocaleString()}${contextSource}`,
+      `  Usage: ${pct}%`,
+      `  Compaction threshold: ${compactionThreshold.toLocaleString()} (80%)`,
+      willCompactSoon
+        ? `  ⚠ Will compact on next turn`
+        : `  ✓ Below threshold`,
+      `  Last provider: ${lastProvider}`,
+      `  Session: ${sessionId}`,
+    ];
+    await channel.sendMessage(chatJid, lines.join('\n'));
+  }
+
+  async function handleForceCompact(chatJid: string): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group) return;
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    const provider = group.containerConfig?.modelProvider || 'claude';
+    if (provider !== 'ollama') {
+      await channel.sendMessage(
+        chatJid,
+        'Compaction is only available for Ollama models. Claude manages its own context via the SDK.',
+      );
+      return;
+    }
+
+    // Mark for force-compaction and restart the container so the new run picks up the flag
+    pendingForceCompact.add(chatJid);
+    queue.forceCloseAndDeactivate(chatJid);
+
+    await channel.sendMessage(
+      chatJid,
+      'Compaction queued. It will run on the next message you send.',
+    );
+
+    logger.info(
+      { chatJid, group: group.name },
+      'Force compaction queued',
+    );
+  }
+
   async function handleModelSwitch(
     command: string,
     chatJid: string,
@@ -988,6 +1144,18 @@ async function main(): Promise<void> {
       if (/^\/think\s/i.test(trimmed) || trimmed === '/think') {
         handleThinkToggle(trimmed, chatJid).catch((err) =>
           logger.error({ err, chatJid }, 'Think toggle error'),
+        );
+        return;
+      }
+      if (trimmed === '/context') {
+        handleContextReport(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Context report error'),
+        );
+        return;
+      }
+      if (trimmed === '/compact') {
+        handleForceCompact(chatJid).catch((err) =>
+          logger.error({ err, chatJid }, 'Force compact error'),
         );
         return;
       }

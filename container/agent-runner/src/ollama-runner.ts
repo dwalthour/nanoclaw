@@ -456,6 +456,7 @@ async function selfCompact(
     () => {},
     (_name: string, _args: string) => {},
     999_999, // no context limit for the compaction call itself
+    false, // never force-compact within a compaction call
   );
 
   return summary.text;
@@ -474,6 +475,7 @@ async function runAgenticLoop(
   onStreamPartial: (text: string, thinking?: string) => void,
   onTooling: (toolName: string, argSummary: string) => void,
   contextWindowSize = 128_000,
+  forceCompactOnFirstRound = false,
 ): Promise<{ text: string; thinking?: string }> {
   let rounds = 0;
 
@@ -482,13 +484,21 @@ async function runAgenticLoop(
 
     // Check if context window is approaching limit and self-compact if needed
     const estimatedTokens = estimateTokens(session.messages);
-    if (estimatedTokens > contextWindowSize * 0.8) {
+    const isForcedCompact = forceCompactOnFirstRound && rounds === 1;
+    const shouldCompact =
+      isForcedCompact || estimatedTokens > contextWindowSize * 0.8;
+    if (shouldCompact) {
       log(
-        `Session approaching context limit (${estimatedTokens} est. tokens, limit ${contextWindowSize}), self-compacting`,
+        isForcedCompact
+          ? `Force compaction requested (${estimatedTokens} est. tokens, limit ${contextWindowSize})`
+          : `Session approaching context limit (${estimatedTokens} est. tokens, limit ${contextWindowSize}), self-compacting`,
       );
+      // Aggressive compaction: keep only the most recent ~25% of context
+      // (or even tighter when force-compacting)
+      const keepRatio = isForcedCompact ? 0.15 : 0.25;
       const splitPoint = findCompactionSplitPoint(
         session.messages,
-        contextWindowSize * 0.5,
+        contextWindowSize * keepRatio,
       );
       const toCompact = getMessagesForOllama({
         ...session,
@@ -505,10 +515,23 @@ async function runAgenticLoop(
       );
       log(`Compaction summary: ${summary.length} chars`);
 
+      const beforeMessages = session.messages.length;
+      const beforeTokens = estimatedTokens;
       applyCompaction(session, splitPoint, summary);
+      const afterMessages = session.messages.length;
+      const afterTokens = estimateTokens(session.messages);
+
+      // Inject a system notification so the model knows compaction just completed
+      appendMessage(session, {
+        role: 'system',
+        content: `[SYSTEM NOTIFICATION — Compaction has just completed. Your context was reduced from ${beforeMessages} messages (~${beforeTokens.toLocaleString()} tokens) to ${afterMessages} messages (~${afterTokens.toLocaleString()} tokens). The earlier conversation is summarized in the system message above. Recent messages are preserved. This message was injected by NanoClaw infrastructure, not sent by a user.]`,
+        provider: 'ollama',
+        model,
+      });
+
       saveSession(session);
       log(
-        `Session compacted: ${session.messages.length} messages, ~${estimateTokens(session.messages)} tokens`,
+        `Session compacted: ${afterMessages} messages, ~${afterTokens} tokens`,
       );
     }
 
@@ -641,6 +664,16 @@ export async function runOllamaAgent(
         }
       }
     }
+    // Ollama Cloud models enforce a tighter effective limit than the model's
+    // reported context_length. Empirically: failed at ~100K estimated tokens
+    // ("exceeded by 3 tokens" error), worked fine at ~41K. Cap at 80K to keep
+    // compaction firing well before the degradation/overflow zone.
+    if (model.endsWith(':cloud') && contextWindowSize > 81920) {
+      log(
+        `Cloud model detected — capping context from ${contextWindowSize} to 81920 (empirical safe limit)`,
+      );
+      contextWindowSize = 81920;
+    }
     log(`Model context window: ${contextWindowSize} tokens`);
   } catch (err) {
     const msg = `Cannot reach Ollama at ${ollamaHost}: ${err instanceof Error ? err.message : String(err)}. Is Ollama running?`;
@@ -730,6 +763,7 @@ export async function runOllamaAgent(
           });
         },
         contextWindowSize,
+        containerInput.forceCompact ?? false,
       );
 
       // Save session and emit final (non-partial) output
