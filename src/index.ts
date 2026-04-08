@@ -64,6 +64,7 @@ import {
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { MessageDebouncer } from './message-debouncer.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -584,6 +585,7 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    debouncer.flushAll(); // flush any pending multipart messages before exit
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -633,10 +635,20 @@ async function main(): Promise<void> {
     }
   }
 
+  // Debounce buffer: reassembles multipart messages before they reach the DB.
+  // Telegram splits long messages into separate events arriving milliseconds apart.
+  // Without this, the agent can read a partial message before all fragments arrive.
+  // The buffer holds user messages for 1 second after the last fragment; bot and
+  // self messages pass through immediately since their splits are intentional.
+  const debouncer = new MessageDebouncer(
+    (chatJid: string, msg: NewMessage) => storeMessage(msg),
+    1000,
+  );
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
     onMessage: (chatJid: string, msg: NewMessage) => {
-      // Remote control commands — intercept before storage
+      // Remote control commands — intercept before debounce/storage
       const trimmed = msg.content.trim();
       if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
         handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
@@ -661,7 +673,9 @@ async function main(): Promise<void> {
           return;
         }
       }
-      storeMessage(msg);
+
+      // Route through debouncer — merges multipart fragments before storing
+      debouncer.push(chatJid, msg);
     },
     onChatMetadata: (
       chatJid: string,
