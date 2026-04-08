@@ -215,10 +215,7 @@ export class GroupQueue {
       fs.writeFileSync(path.join(inputDir, '_interrupt'), '');
       return true;
     } catch (err) {
-      logger.error(
-        { groupFolder, err },
-        'Failed to write interrupt sentinel',
-      );
+      logger.error({ groupFolder, err }, 'Failed to write interrupt sentinel');
       return false;
     }
   }
@@ -237,10 +234,7 @@ export class GroupQueue {
     try {
       execFileSync('docker', ['kill', containerName], { stdio: 'ignore' });
     } catch (err) {
-      logger.error(
-        { groupFolder, containerName, err },
-        'docker kill failed',
-      );
+      logger.error({ groupFolder, containerName, err }, 'docker kill failed');
       return false;
     }
 

@@ -783,9 +783,7 @@ async function startMessageLoop(): Promise<void> {
               );
               await ackChannel?.sendMessage(
                 lastInterrupt.chat_jid,
-                sent
-                  ? 'Interrupting...'
-                  : 'No active container to interrupt.',
+                sent ? 'Interrupting...' : 'No active container to interrupt.',
               );
             }
           }
