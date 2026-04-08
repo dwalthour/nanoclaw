@@ -39,6 +39,7 @@ import {
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessagesSince,
+  getMessagesSinceForJids,
   getNewMessages,
   getRouterState,
   initDatabase,
@@ -115,6 +116,27 @@ function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
       );
     },
   );
+}
+
+/**
+ * Get all JIDs that share the same group folder.
+ * Used for unified sessions across multiple channels.
+ */
+function getJidsForFolder(folder: string): string[] {
+  return Object.entries(registeredGroups)
+    .filter(([, group]) => group.folder === folder)
+    .map(([jid]) => jid);
+}
+
+/**
+ * Get the group info for a folder (all jids share the same group info).
+ * Returns the first matching group, or undefined if none found.
+ */
+function getGroupForFolder(folder: string): RegisteredGroup | undefined {
+  for (const group of Object.values(registeredGroups)) {
+    if (group.folder === folder) return group;
+  }
+  return undefined;
 }
 
 function loadState(): void {
@@ -236,27 +258,49 @@ export function _setRegisteredGroups(
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
+ * Now takes groupFolder instead of chatJid to support unified sessions.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
-  const group = registeredGroups[chatJid];
+async function processGroupMessages(groupFolder: string): Promise<boolean> {
+  const group = getGroupForFolder(groupFolder);
   if (!group) return true;
 
-  const channel = findChannel(channels, chatJid);
-  if (!channel) {
-    logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-    return true;
-  }
+  // Get all JIDs that share this folder (for unified sessions)
+  const jids = getJidsForFolder(groupFolder);
+  if (jids.length === 0) return true;
+
+  // Find the primary channel for sending replies
+  // Use the JID that has the most recent message
+  let primaryJid = jids[0];
+  let primaryChannel = findChannel(channels, primaryJid);
 
   const isMainGroup = group.isMain === true;
 
-  const missedMessages = getMessagesSince(
-    chatJid,
-    getOrRecoverCursor(chatJid),
+  // Collect messages from all JIDs sharing this folder
+  // Use the earliest cursor among all JIDs to avoid missing messages
+  const cursors = jids.map((jid) => getOrRecoverCursor(jid));
+  const earliestCursor = cursors.reduce((a, b) => (a < b ? a : b));
+
+  const missedMessages = getMessagesSinceForJids(
+    jids,
+    earliestCursor,
     ASSISTANT_NAME,
     MAX_MESSAGES_PER_PROMPT,
   );
 
   if (missedMessages.length === 0) return true;
+
+  // Find the JID of the most recent message for reply routing
+  const lastMessage = missedMessages[missedMessages.length - 1];
+  primaryJid = lastMessage.chat_jid;
+  primaryChannel = findChannel(channels, primaryJid);
+
+  if (!primaryChannel) {
+    logger.warn(
+      { primaryJid },
+      'No channel owns primary JID, skipping messages',
+    );
+    return true;
+  }
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
@@ -265,22 +309,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const hasTrigger = missedMessages.some(
       (m) =>
         triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
+        (m.is_from_me || isTriggerAllowed(primaryJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) return true;
   }
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
 
-  // Advance cursor so the piping path in startMessageLoop won't re-fetch
-  // these messages. Save the old cursor so we can roll back on error.
-  const previousCursor = lastAgentTimestamp[chatJid] || '';
-  lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+  // Advance cursor for ALL jids to avoid re-processing
+  // Use the timestamp of the last message processed
+  const lastTimestamp = missedMessages[missedMessages.length - 1].timestamp;
+  for (const jid of jids) {
+    lastAgentTimestamp[jid] = lastTimestamp;
+  }
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: missedMessages.length, jids },
     'Processing messages',
   );
 
@@ -299,11 +344,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Idle timeout, closing container stdin',
       );
-      queue.closeStdin(chatJid);
+      queue.closeStdin(groupFolder);
     }, IDLE_TIMEOUT);
   };
 
-  await channel.setTyping?.(chatJid, true);
+  await primaryChannel.setTyping?.(primaryJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -319,10 +364,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let currentRoundText = '';
 
   const flushEdit = async () => {
-    if (pendingEditText && streamingMessageId && channel.editMessage) {
+    if (pendingEditText && streamingMessageId && primaryChannel?.editMessage) {
       const text = pendingEditText;
       pendingEditText = null;
-      await channel.editMessage(chatJid, streamingMessageId, text);
+      await primaryChannel.editMessage(primaryJid, streamingMessageId, text);
     }
   };
 
@@ -336,7 +381,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   };
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
+  const output = await runAgent(group, prompt, primaryJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -384,30 +429,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               : text;
           }
           currentRoundText = '';
-          if (streamingMessageId && channel.editMessage) {
-            await channel.editMessage(
-              chatJid,
+          if (streamingMessageId && primaryChannel?.editMessage) {
+            await primaryChannel.editMessage(
+              primaryJid,
               streamingMessageId,
               completedText,
             );
-          } else if (channel.sendMessageReturningId) {
-            streamingMessageId = await channel.sendMessageReturningId(
-              chatJid,
+          } else if (primaryChannel?.sendMessageReturningId) {
+            streamingMessageId = await primaryChannel.sendMessageReturningId(
+              primaryJid,
               completedText,
             );
             outputSentToUser = true;
           }
-        } else if (streamingMessageId && channel.editMessage) {
+        } else if (streamingMessageId && primaryChannel?.editMessage) {
           // Streaming partial — text is the full accumulated text for this round.
           // Prepend completedText (prior rounds + tool calls) for full display.
           currentRoundText = text;
           const fullText = completedText ? `${completedText}\n\n${text}` : text;
           debouncedEdit(fullText);
-        } else if (channel.sendMessageReturningId) {
+        } else if (primaryChannel?.sendMessageReturningId) {
           // First partial — send initial message and track its ID
           currentRoundText = text;
-          streamingMessageId = await channel.sendMessageReturningId(
-            chatJid,
+          streamingMessageId = await primaryChannel.sendMessageReturningId(
+            primaryJid,
             text,
           );
           outputSentToUser = true;
@@ -420,17 +465,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           clearTimeout(editDebounceTimer);
           editDebounceTimer = null;
         }
-        if (streamingMessageId && channel.editMessage) {
+        if (streamingMessageId && primaryChannel?.editMessage) {
           // Edit the streaming message one final time with complete text,
           // including any accumulated text from before tool calls
           const fullText = completedText ? `${completedText}\n\n${text}` : text;
-          await channel.editMessage(chatJid, streamingMessageId, fullText);
+          await primaryChannel.editMessage(
+            primaryJid,
+            streamingMessageId,
+            fullText,
+          );
           streamingMessageId = null;
           completedText = '';
           currentRoundText = '';
         } else {
           // No streaming happened, or channel doesn't support it
-          await channel.sendMessage(chatJid, text);
+          await primaryChannel?.sendMessage(primaryJid, text);
         }
         outputSentToUser = true;
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
@@ -444,7 +493,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       streamingMessageId = null;
       completedText = '';
       currentRoundText = '';
-      queue.notifyIdle(chatJid);
+      queue.notifyIdle(groupFolder);
     }
 
     if (result.status === 'error') {
@@ -452,7 +501,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await channel.setTyping?.(chatJid, false);
+  await primaryChannel?.setTyping?.(primaryJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -465,8 +514,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       );
       return true;
     }
-    // Roll back cursor so retries can re-process these messages
-    lastAgentTimestamp[chatJid] = previousCursor;
+    // Roll back cursor for all jids so retries can re-process these messages
+    for (const jid of jids) {
+      lastAgentTimestamp[jid] = earliestCursor;
+    }
     saveState();
     logger.warn(
       { group: group.name },
@@ -565,7 +616,7 @@ async function runAgent(
         forceCompact,
       },
       (proc, containerName) =>
-        queue.registerProcess(chatJid, proc, containerName, group.folder),
+        queue.registerProcess(group.folder, proc, containerName),
       wrappedOnOutput,
     );
 
@@ -638,26 +689,25 @@ async function startMessageLoop(): Promise<void> {
         lastTimestamp = newTimestamp;
         saveState();
 
-        // Deduplicate by group
-        const messagesByGroup = new Map<string, NewMessage[]>();
+        // Deduplicate by group folder (unified sessions: multiple jids may share one folder)
+        const messagesByFolder = new Map<string, NewMessage[]>();
         for (const msg of messages) {
-          const existing = messagesByGroup.get(msg.chat_jid);
+          const group = registeredGroups[msg.chat_jid];
+          if (!group) continue;
+          const existing = messagesByFolder.get(group.folder);
           if (existing) {
             existing.push(msg);
           } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
+            messagesByFolder.set(group.folder, [msg]);
           }
         }
 
-        for (const [chatJid, groupMessages] of messagesByGroup) {
-          const group = registeredGroups[chatJid];
+        for (const [groupFolder, groupMessages] of messagesByFolder) {
+          const group = getGroupForFolder(groupFolder);
           if (!group) continue;
 
-          const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
-            continue;
-          }
+          // Get all jids for this folder
+          const jids = getJidsForFolder(groupFolder);
 
           const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
@@ -668,20 +718,25 @@ async function startMessageLoop(): Promise<void> {
           if (needsTrigger) {
             const triggerPattern = getTriggerPattern(group.trigger);
             const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
+            const hasTrigger = groupMessages.some((m) => {
+              const msgJid = m.chat_jid;
+              return (
                 triggerPattern.test(m.content.trim()) &&
                 (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
+                  isTriggerAllowed(msgJid, m.sender, allowlistCfg))
+              );
+            });
             if (!hasTrigger) continue;
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
-            chatJid,
-            getOrRecoverCursor(chatJid),
+          // Use earliest cursor among all jids for this folder.
+          const cursors = jids.map((jid) => getOrRecoverCursor(jid));
+          const earliestCursor = cursors.reduce((a, b) => (a < b ? a : b));
+          const allPending = getMessagesSinceForJids(
+            jids,
+            earliestCursor,
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
@@ -689,23 +744,32 @@ async function startMessageLoop(): Promise<void> {
             allPending.length > 0 ? allPending : groupMessages;
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (queue.sendMessage(groupFolder, formatted)) {
             logger.debug(
-              { chatJid, count: messagesToSend.length },
+              { groupFolder, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
+            // Update cursors for all jids
+            const lastTs = messagesToSend[messagesToSend.length - 1].timestamp;
+            for (const jid of jids) {
+              lastAgentTimestamp[jid] = lastTs;
+            }
             saveState();
-            // Show typing indicator while the container processes the piped message
-            channel
-              .setTyping?.(chatJid, true)
+            // Show typing indicator on the channel of the last message
+            const lastMsgJid =
+              messagesToSend[messagesToSend.length - 1].chat_jid;
+            const lastChannel = findChannel(channels, lastMsgJid);
+            lastChannel
+              ?.setTyping?.(lastMsgJid, true)
               ?.catch((err) =>
-                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+                logger.warn(
+                  { chatJid: lastMsgJid, err },
+                  'Failed to set typing indicator',
+                ),
               );
           } else {
             // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            queue.enqueueMessageCheck(groupFolder);
           }
         }
       }
@@ -721,19 +785,29 @@ async function startMessageLoop(): Promise<void> {
  * Handles crash between advancing lastTimestamp and processing messages.
  */
 function recoverPendingMessages(): void {
-  for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const pending = getMessagesSince(
-      chatJid,
-      getOrRecoverCursor(chatJid),
+  // Group by folder to handle unified sessions
+  const folders = new Set<string>();
+  for (const group of Object.values(registeredGroups)) {
+    folders.add(group.folder);
+  }
+
+  for (const folder of folders) {
+    const jids = getJidsForFolder(folder);
+    const cursors = jids.map((jid) => getOrRecoverCursor(jid));
+    const earliestCursor = cursors.reduce((a, b) => (a < b ? a : b));
+    const pending = getMessagesSinceForJids(
+      jids,
+      earliestCursor,
       ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
     );
     if (pending.length > 0) {
+      const group = getGroupForFolder(folder);
       logger.info(
-        { group: group.name, pendingCount: pending.length },
+        { group: group?.name, folder, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
       );
-      queue.enqueueMessageCheck(chatJid);
+      queue.enqueueMessageCheck(folder);
     }
   }
 }
@@ -938,8 +1012,8 @@ async function main(): Promise<void> {
     }
 
     // Mark for force-compaction and restart the container so the new run picks up the flag
-    pendingForceCompact.add(chatJid);
-    queue.forceCloseAndDeactivate(chatJid);
+    pendingForceCompact.add(group.folder);
+    queue.forceCloseAndDeactivate(group.folder);
 
     await channel.sendMessage(
       chatJid,
@@ -1041,7 +1115,7 @@ async function main(): Promise<void> {
 
     // Close the active container and deactivate immediately so new messages
     // don't get piped to the dying container. Next message spawns a fresh one.
-    queue.forceCloseAndDeactivate(chatJid);
+    queue.forceCloseAndDeactivate(group.folder);
 
     // Only clear the SDK session when switching providers (Claude ↔ Ollama).
     // Claude-to-Claude model changes preserve the SDK session since the SDK
@@ -1226,8 +1300,8 @@ async function main(): Promise<void> {
     getSessions: () => sessions,
     getUnifiedSessions: () => unifiedSessions,
     queue,
-    onProcess: (groupJid, proc, containerName, groupFolder) =>
-      queue.registerProcess(groupJid, proc, containerName, groupFolder),
+    onProcess: (groupFolder, proc, containerName) =>
+      queue.registerProcess(groupFolder, proc, containerName),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
