@@ -126,6 +126,57 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Remove UNIQUE constraint from folder column (migration for unified sessions)
+  // SQLite doesn't support ALTER TABLE DROP CONSTRAINT, so we recreate the table
+  try {
+    // Check if folder still has UNIQUE constraint
+    const tableInfo = database
+      .prepare(`PRAGMA table_info(registered_groups)`)
+      .all() as Array<{ name: string; pk: number }>;
+    const indexList = database
+      .prepare(`PRAGMA index_list(registered_groups)`)
+      .all() as Array<{ name: string; unique: number }>;
+
+    // If there's a unique index on folder, we need to rebuild
+    const hasUniqueFolder = indexList.some(
+      (idx) => idx.unique === 1 && idx.name.includes('folder'),
+    );
+
+    if (hasUniqueFolder) {
+      logger.info('Migrating registered_groups: removing UNIQUE from folder');
+      // Create new table without UNIQUE constraint on folder
+      database.exec(`
+        CREATE TABLE IF NOT EXISTS registered_groups_new (
+          jid TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          folder TEXT NOT NULL,
+          trigger_pattern TEXT NOT NULL,
+          added_at TEXT NOT NULL,
+          container_config TEXT,
+          requires_trigger INTEGER DEFAULT 1,
+          is_main INTEGER DEFAULT 0
+        )
+      `);
+      // Copy existing data
+      database.exec(`
+        INSERT INTO registered_groups_new
+        SELECT jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main
+        FROM registered_groups
+      `);
+      // Drop old table and rename new one
+      database.exec(`DROP TABLE registered_groups`);
+      database.exec(
+        `ALTER TABLE registered_groups_new RENAME TO registered_groups`,
+      );
+      logger.info('Migration complete: folder column no longer unique');
+    }
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Migration: folder UNIQUE removal (may already be done)',
+    );
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -396,6 +447,39 @@ export function getMessagesSince(
   return db
     .prepare(sql)
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
+}
+
+/**
+ * Get messages since a timestamp for multiple chat JIDs.
+ * Used for unified sessions that combine multiple channels.
+ */
+export function getMessagesSinceForJids(
+  jids: string[],
+  sinceTimestamp: string,
+  botPrefix: string,
+  limit: number = 200,
+): NewMessage[] {
+  if (jids.length === 0) return [];
+  if (jids.length === 1) {
+    return getMessagesSince(jids[0], sinceTimestamp, botPrefix, limit);
+  }
+
+  const placeholders = jids.map(() => '?').join(', ');
+  const sql = `
+    SELECT * FROM (
+      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
+             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+      FROM messages
+      WHERE chat_jid IN (${placeholders}) AND timestamp > ?
+        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `;
+  return db
+    .prepare(sql)
+    .all(...jids, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
 export function getLastBotMessageTimestamp(
