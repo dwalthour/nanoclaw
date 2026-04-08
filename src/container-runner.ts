@@ -53,6 +53,7 @@ export interface ContainerInput {
   ollamaModel?: string;
   unifiedSessionId?: string;
   forceCompact?: boolean;
+  gitSha?: string;
 }
 
 export interface ContainerOutput {

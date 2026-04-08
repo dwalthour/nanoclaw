@@ -47,6 +47,7 @@ export interface ContainerInput {
   ollamaModel?: string;
   unifiedSessionId?: string;
   forceCompact?: boolean;
+  gitSha?: string;
 }
 
 export interface ContainerOutput {
@@ -728,6 +729,13 @@ export async function preparePrompt(
   containerInput: ContainerInput,
 ): Promise<{ prompt: string; shouldRun: boolean }> {
   let prompt = containerInput.prompt;
+
+  // Inject git SHA as startup context if provided
+  if (containerInput.gitSha && containerInput.gitSha !== 'unknown') {
+    const startupNote = `[SYSTEM — This container is running NanoClaw commit ${containerInput.gitSha.slice(0, 7)}]\n\n`;
+    prompt = startupNote + prompt;
+  }
+
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
