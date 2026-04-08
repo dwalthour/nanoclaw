@@ -29,7 +29,6 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
-import { GIT_SHA } from './generated-version.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -200,7 +199,6 @@ async function runTask(
         claudeModel: group.containerConfig?.claudeModel,
         ollamaModel: group.containerConfig?.ollamaModel,
         unifiedSessionId,
-        gitSha: GIT_SHA,
       },
       (proc, containerName) =>
         deps.onProcess(task.group_folder, proc, containerName),

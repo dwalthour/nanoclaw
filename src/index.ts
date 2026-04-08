@@ -15,7 +15,6 @@ import {
   TIMEZONE,
 } from './config.js';
 import './channels/index.js';
-import { GIT_SHA, GIT_SHA_SHORT } from './generated-version.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
@@ -615,7 +614,6 @@ async function runAgent(
         ollamaModel: group.containerConfig?.ollamaModel,
         unifiedSessionId: unifiedSessions[group.folder],
         forceCompact,
-        gitSha: GIT_SHA,
       },
       (proc, containerName) =>
         queue.registerProcess(group.folder, proc, containerName),
@@ -823,10 +821,6 @@ async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
-  logger.info(
-    { gitSha: GIT_SHA_SHORT, gitShaFull: GIT_SHA },
-    'NanoClaw starting',
-  );
   loadState();
 
   // Ensure OneCLI agents exist for all registered groups.

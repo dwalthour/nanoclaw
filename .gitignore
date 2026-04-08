@@ -39,4 +39,3 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
-src/generated-version.ts
