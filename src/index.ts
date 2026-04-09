@@ -3,6 +3,19 @@ import path from 'path';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
+// Debug logging for Signal routing investigation
+function debugLog(message: string, data?: Record<string, unknown>): void {
+  const logPath = '/workspace/project/store/debug.log';
+  const timestamp = new Date().toISOString();
+  const dataStr = data ? ' ' + JSON.stringify(data) : '';
+  const line = `[${timestamp}] ${message}${dataStr}\n`;
+  try {
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // Ignore write errors
+  }
+}
+
 import {
   ASSISTANT_NAME,
   DEFAULT_TRIGGER,
@@ -296,6 +309,14 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   const previousActiveJid = getRouterState(activeJidKey);
   let activeJid = previousActiveJid;
 
+  debugLog('Processing bundle', {
+    group: group.name,
+    folder: groupFolder,
+    jids,
+    previousActiveJid,
+    channels: channels.map((c) => c.name),
+  });
+
   logger.info(
     { group: group.name, folder: groupFolder, jids, previousActiveJid },
     'Processing bundle for group',
@@ -307,6 +328,13 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     if (msg.is_bot_message) continue; // Don't switch on bot messages
     const msgChannel = findChannel(channels, msg.chat_jid);
     const currentChannel = activeJid ? findChannel(channels, activeJid) : null;
+
+    debugLog('Checking message for switch', {
+      msgJid: msg.chat_jid,
+      msgChannel: msgChannel?.name,
+      currentChannel: currentChannel?.name,
+      isBot: msg.is_bot_message,
+    });
 
     logger.info(
       {
@@ -326,6 +354,11 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     ) {
       activeJid = msg.chat_jid;
       setRouterState(activeJidKey, activeJid);
+      debugLog('SWITCHED active channel', {
+        group: group.name,
+        newChannel: msgChannel.name,
+        newJid: activeJid,
+      });
       logger.info(
         { group: group.name, newChannel: msgChannel.name, newJid: activeJid },
         'Active channel switched',
@@ -339,6 +372,10 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     const lastMessage = missedMessages[missedMessages.length - 1];
     activeJid = lastMessage.chat_jid;
     setRouterState(activeJidKey, activeJid);
+    debugLog('First time setting active channel', {
+      group: group.name,
+      activeJid,
+    });
     logger.info(
       { group: group.name, activeJid },
       'First time setting active channel',
@@ -347,6 +384,11 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
 
   primaryJid = activeJid;
   primaryChannel = findChannel(channels, primaryJid);
+
+  debugLog('Final channel selection', {
+    primaryJid,
+    primaryChannel: primaryChannel?.name,
+  });
 
   logger.info(
     { group: group.name, primaryJid, primaryChannel: primaryChannel?.name },
