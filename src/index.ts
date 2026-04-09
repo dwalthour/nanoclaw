@@ -505,6 +505,14 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
       // Check if continuation is approaching the threshold
       const check = chunker.checkThreshold('', continuationText);
 
+      debugLog('flushEdit', {
+        fullTextLength: fullText.length,
+        splitPoint,
+        continuationLength: continuationText.length,
+        needsChunk: check.needsChunk,
+        threshold: check.threshold,
+      });
+
       if (check.needsChunk) {
         // Need to split the continuation and start a new message
         const { first, rest } = chunker.splitAtBoundary(
@@ -640,12 +648,58 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
         if (streamingMessageId && primaryChannel?.editMessage) {
           // Edit the streaming message one final time with complete text,
           // including any accumulated text from before tool calls
-          const fullText = completedText ? `${completedText}\n\n${text}` : text;
-          await primaryChannel.editMessage(
-            primaryJid,
-            streamingMessageId,
-            fullText,
-          );
+          let fullText = completedText ? `${completedText}\n\n${text}` : text;
+
+          // Check if final output exceeds threshold and needs chunking
+          const check = chunker.checkThreshold('', fullText);
+          debugLog('Final output', {
+            fullTextLength: fullText.length,
+            needsChunk: check.needsChunk,
+            threshold: check.threshold,
+          });
+
+          if (check.needsChunk) {
+            // Split and send in chunks
+            let remaining = fullText;
+            let isFirstChunk = true;
+            while (remaining.length > 0) {
+              if (remaining.length <= chunker.getThreshold()) {
+                // Last chunk fits
+                if (isFirstChunk) {
+                  await primaryChannel.editMessage(
+                    primaryJid,
+                    streamingMessageId,
+                    remaining,
+                  );
+                } else {
+                  await primaryChannel.sendMessage(primaryJid, remaining);
+                }
+                break;
+              }
+              // Need to split
+              const { first, rest } = chunker.splitAtBoundary(
+                remaining,
+                chunker.getThreshold(),
+              );
+              if (isFirstChunk) {
+                await primaryChannel.editMessage(
+                  primaryJid,
+                  streamingMessageId,
+                  first,
+                );
+                isFirstChunk = false;
+              } else {
+                await primaryChannel.sendMessage(primaryJid, first);
+              }
+              remaining = rest;
+            }
+          } else {
+            await primaryChannel.editMessage(
+              primaryJid,
+              streamingMessageId,
+              fullText,
+            );
+          }
           streamingMessageId = null;
           completedText = '';
           currentRoundText = '';
