@@ -308,6 +308,15 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     MAX_MESSAGES_PER_PROMPT,
   );
 
+  debugLog('Messages in bundle', {
+    count: missedMessages.length,
+    messages: missedMessages.map((m) => ({
+      jid: m.chat_jid,
+      from: m.sender_name,
+      isBot: m.is_bot_message,
+    })),
+  });
+
   if (missedMessages.length === 0) return true;
 
   // Stable active channel: track which channel the user is actively using
