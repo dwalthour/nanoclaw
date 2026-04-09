@@ -25,10 +25,24 @@ import {
   MAX_MESSAGES_PER_PROMPT,
   ONECLI_URL,
   POLL_INTERVAL,
+  STORE_DIR,
   TIMEZONE,
 } from './config.js';
+
+// Debug logging for Signal routing investigation
+function debugLog(message: string, data?: Record<string, unknown>): void {
+  const logPath = path.join(STORE_DIR, 'debug.log');
+  const timestamp = new Date().toISOString();
+  const dataStr = data ? ' ' + JSON.stringify(data) : '';
+  const line = `[${timestamp}] ${message}${dataStr}\n`;
+  try {
+    fs.appendFileSync(logPath, line);
+  } catch {
+    // Ignore write errors
+  }
+}
+
 import { MessageChunker, detectChannelFromJid } from './message-chunker.js';
-import './channels/index.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
