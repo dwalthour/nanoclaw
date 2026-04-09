@@ -856,7 +856,21 @@ async function startMessageLoop(): Promise<void> {
         ASSISTANT_NAME,
       );
 
+      debugLog('Poll cycle', {
+        jidCount: jids.length,
+        msgCount: messages.length,
+        lastTimestamp,
+        newTimestamp,
+      });
+
       if (messages.length > 0) {
+        debugLog('New messages found', {
+          messages: messages.map((m) => ({
+            jid: m.chat_jid,
+            from: m.sender_name,
+            ts: m.timestamp,
+          })),
+        });
         logger.info({ count: messages.length }, 'New messages');
 
         // Advance the "seen" cursor for all messages immediately
@@ -1438,10 +1452,15 @@ async function main(): Promise<void> {
   // Without this, the agent can read a partial message before all fragments arrive.
   // The buffer holds user messages for 1 second after the last fragment; bot and
   // self messages pass through immediately since their splits are intentional.
-  const debouncer = new MessageDebouncer(
-    (chatJid: string, msg: NewMessage) => storeMessage(msg),
-    1000,
-  );
+  const debouncer = new MessageDebouncer((chatJid: string, msg: NewMessage) => {
+    debugLog('Debouncer flush', {
+      chatJid,
+      sender: msg.sender_name,
+      content: msg.content.slice(0, 50),
+      timestamp: msg.timestamp,
+    });
+    storeMessage(msg);
+  }, 1000);
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
