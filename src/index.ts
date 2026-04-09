@@ -301,6 +301,12 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   const cursors = jids.map((jid) => getOrRecoverCursor(jid));
   const earliestCursor = cursors.reduce((a, b) => (a < b ? a : b));
 
+  debugLog('Cursors for bundle', {
+    jids,
+    cursors: jids.map((jid, i) => ({ jid, cursor: cursors[i] })),
+    earliestCursor,
+  });
+
   const missedMessages = getMessagesSinceForJids(
     jids,
     earliestCursor,
@@ -314,6 +320,7 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
       jid: m.chat_jid,
       from: m.sender_name,
       isBot: m.is_bot_message,
+      ts: m.timestamp,
     })),
   });
 
