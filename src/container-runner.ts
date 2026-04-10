@@ -64,6 +64,11 @@ export interface ContainerOutput {
   isPartial?: boolean;
   isTooling?: boolean;
   thinking?: string;
+  requestModelSwitch?: {
+    provider: 'claude' | 'ollama';
+    model?: string;
+    reason?: string;
+  };
 }
 
 interface VolumeMount {
