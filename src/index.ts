@@ -160,6 +160,25 @@ function getGroupForFolder(folder: string): RegisteredGroup | undefined {
   return undefined;
 }
 
+/**
+ * Find a group for a folder that has containerConfig set.
+ * For unified sessions, multiple JIDs may share the same folder, but only some
+ * may have containerConfig populated (e.g., Telegram row has it, Signal row doesn't).
+ * Returns the first group with containerConfig, falling back to any group for the folder.
+ */
+function getGroupWithConfigForFolder(
+  folder: string,
+): RegisteredGroup | undefined {
+  let fallback: RegisteredGroup | undefined;
+  for (const group of Object.values(registeredGroups)) {
+    if (group.folder === folder) {
+      if (group.containerConfig) return group;
+      if (!fallback) fallback = group;
+    }
+  }
+  return fallback;
+}
+
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
   const agentTs = getRouterState('last_agent_timestamp');
@@ -282,7 +301,9 @@ export function _setRegisteredGroups(
  * Now takes groupFolder instead of chatJid to support unified sessions.
  */
 async function processGroupMessages(groupFolder: string): Promise<boolean> {
-  const group = getGroupForFolder(groupFolder);
+  // Use group with containerConfig if available (for unified sessions where
+  // one JID may have config and another may not)
+  const group = getGroupWithConfigForFolder(groupFolder);
   if (!group) return true;
 
   // Get all JIDs that share this folder (for unified sessions)
