@@ -637,6 +637,8 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
           const safeCurrentRound = currentRoundText
             ? stripUnclosedInternalTag(currentRoundText)
             : '';
+          // Track the previous completed text length for Signal delta calculation
+          const previousCompletedLength = completedText.length;
           if (safeCurrentRound) {
             completedText = completedText
               ? `${completedText}\n\n${safeCurrentRound}\n\n${text}`
@@ -663,8 +665,19 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
             );
             outputSentToUser = true;
           } else if (activeChannel1?.sendMessage) {
-            // Channel doesn't support editing (e.g., Signal) - send tool info as new message
-            await activeChannel1.sendMessage(activeJid1, completedText);
+            // Channel doesn't support editing (e.g., Signal) - send only the NEW tool info
+            // to avoid repeated messages. For the first tool call, send everything.
+            // For subsequent calls, send only the delta (new content since last send).
+            const isFirstToolCall = !outputSentToUser;
+            if (isFirstToolCall) {
+              await activeChannel1.sendMessage(activeJid1, completedText);
+            } else {
+              // Send only the new content: current tool text + any pending round text
+              const newContent = safeCurrentRound
+                ? `${safeCurrentRound}\n\n${text}`
+                : text;
+              await activeChannel1.sendMessage(activeJid1, newContent);
+            }
             outputSentToUser = true;
           }
         } else if (streamingMessageId) {
