@@ -63,6 +63,18 @@ export interface ContainerOutput {
     model?: string;
     reason?: string;
   };
+  /** Notification that compaction is starting */
+  compactionStarted?: {
+    beforeMessages: number;
+    beforeTokens: number;
+  };
+  /** Notification that compaction completed */
+  compactionCompleted?: {
+    beforeMessages: number;
+    beforeTokens: number;
+    afterMessages: number;
+    afterTokens: number;
+  };
 }
 
 interface SessionEntry {
