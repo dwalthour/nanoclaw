@@ -505,6 +505,14 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
       // Check if continuation is approaching the threshold
       const check = chunker.checkThreshold('', continuationText);
 
+      debugLog('flushEdit', {
+        fullTextLength: fullText.length,
+        splitPoint,
+        continuationLength: continuationText.length,
+        needsChunk: check.needsChunk,
+        threshold: check.threshold,
+      });
+
       if (check.needsChunk) {
         // Need to split the continuation and start a new message
         const { first, rest } = chunker.splitAtBoundary(
@@ -640,12 +648,58 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
         if (streamingMessageId && primaryChannel?.editMessage) {
           // Edit the streaming message one final time with complete text,
           // including any accumulated text from before tool calls
-          const fullText = completedText ? `${completedText}\n\n${text}` : text;
-          await primaryChannel.editMessage(
-            primaryJid,
-            streamingMessageId,
-            fullText,
-          );
+          let fullText = completedText ? `${completedText}\n\n${text}` : text;
+
+          // Check if final output exceeds threshold and needs chunking
+          const check = chunker.checkThreshold('', fullText);
+          debugLog('Final output', {
+            fullTextLength: fullText.length,
+            needsChunk: check.needsChunk,
+            threshold: check.threshold,
+          });
+
+          if (check.needsChunk) {
+            // Split and send in chunks
+            let remaining = fullText;
+            let isFirstChunk = true;
+            while (remaining.length > 0) {
+              if (remaining.length <= chunker.getThreshold()) {
+                // Last chunk fits
+                if (isFirstChunk) {
+                  await primaryChannel.editMessage(
+                    primaryJid,
+                    streamingMessageId,
+                    remaining,
+                  );
+                } else {
+                  await primaryChannel.sendMessage(primaryJid, remaining);
+                }
+                break;
+              }
+              // Need to split
+              const { first, rest } = chunker.splitAtBoundary(
+                remaining,
+                chunker.getThreshold(),
+              );
+              if (isFirstChunk) {
+                await primaryChannel.editMessage(
+                  primaryJid,
+                  streamingMessageId,
+                  first,
+                );
+                isFirstChunk = false;
+              } else {
+                await primaryChannel.sendMessage(primaryJid, first);
+              }
+              remaining = rest;
+            }
+          } else {
+            await primaryChannel.editMessage(
+              primaryJid,
+              streamingMessageId,
+              fullText,
+            );
+          }
           streamingMessageId = null;
           completedText = '';
           currentRoundText = '';
@@ -856,7 +910,21 @@ async function startMessageLoop(): Promise<void> {
         ASSISTANT_NAME,
       );
 
+      debugLog('Poll cycle', {
+        jidCount: jids.length,
+        msgCount: messages.length,
+        lastTimestamp,
+        newTimestamp,
+      });
+
       if (messages.length > 0) {
+        debugLog('New messages found', {
+          messages: messages.map((m) => ({
+            jid: m.chat_jid,
+            from: m.sender_name,
+            ts: m.timestamp,
+          })),
+        });
         logger.info({ count: messages.length }, 'New messages');
 
         // Advance the "seen" cursor for all messages immediately
@@ -1438,10 +1506,15 @@ async function main(): Promise<void> {
   // Without this, the agent can read a partial message before all fragments arrive.
   // The buffer holds user messages for 1 second after the last fragment; bot and
   // self messages pass through immediately since their splits are intentional.
-  const debouncer = new MessageDebouncer(
-    (chatJid: string, msg: NewMessage) => storeMessage(msg),
-    1000,
-  );
+  const debouncer = new MessageDebouncer((chatJid: string, msg: NewMessage) => {
+    debugLog('Debouncer flush', {
+      chatJid,
+      sender: msg.sender_name,
+      content: msg.content.slice(0, 50),
+      timestamp: msg.timestamp,
+    });
+    storeMessage(msg);
+  }, 1000);
 
   // Channel callbacks (shared by all channels)
   const channelOpts = {
