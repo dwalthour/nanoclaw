@@ -294,6 +294,20 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   let primaryJid = jids[0];
   let primaryChannel = findChannel(channels, primaryJid);
 
+  // Helper to get the current active channel from router state
+  // This allows piped messages to switch channels mid-stream
+  const getActiveChannel = () => {
+    const activeJidKey = `active_jid:${groupFolder}`;
+    const activeJid = getRouterState(activeJidKey);
+    if (activeJid) {
+      const channel = findChannel(channels, activeJid);
+      if (channel) {
+        return { jid: activeJid, channel };
+      }
+    }
+    return { jid: primaryJid, channel: primaryChannel };
+  };
+
   const isMainGroup = group.isMain === true;
 
   // Collect messages from all JIDs sharing this folder
@@ -495,7 +509,11 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   let splitPoint = 0;
 
   const flushEdit = async () => {
-    if (pendingEditText && streamingMessageId && primaryChannel?.editMessage) {
+    if (pendingEditText && streamingMessageId) {
+      // Re-fetch active channel in case piped messages switched it
+      const { jid: activeJid, channel: activeChannel } = getActiveChannel();
+      if (!activeChannel?.editMessage) return;
+
       const fullText = pendingEditText;
       pendingEditText = null;
 
@@ -521,17 +539,16 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
         );
 
         // Finalize current message with first chunk
-        const finalText = fullText.slice(0, splitPoint) + first;
-        await primaryChannel.editMessage(primaryJid, streamingMessageId, first);
+        await activeChannel.editMessage(activeJid, streamingMessageId, first);
         logger.info(
           { length: first.length, totalChunks: 1 },
           'Stream chunk finalized (threshold reached)',
         );
 
         // Start a new message with rest
-        if (rest && primaryChannel.sendMessageReturningId) {
-          streamingMessageId = await primaryChannel.sendMessageReturningId(
-            primaryJid,
+        if (rest && activeChannel.sendMessageReturningId) {
+          streamingMessageId = await activeChannel.sendMessageReturningId(
+            activeJid,
             rest,
           );
           splitPoint = fullText.length - rest.length;
@@ -542,8 +559,8 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
         }
       } else {
         // Normal edit - send the continuation to current message
-        await primaryChannel.editMessage(
-          primaryJid,
+        await activeChannel.editMessage(
+          activeJid,
           streamingMessageId,
           continuationText,
         );
@@ -609,33 +626,43 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
               : text;
           }
           currentRoundText = '';
-          if (streamingMessageId && primaryChannel?.editMessage) {
-            await primaryChannel.editMessage(
-              primaryJid,
+          // Re-fetch active channel in case piped messages switched it
+          const { jid: activeJid1, channel: activeChannel1 } =
+            getActiveChannel();
+          if (streamingMessageId && activeChannel1?.editMessage) {
+            await activeChannel1.editMessage(
+              activeJid1,
               streamingMessageId,
               completedText,
             );
-          } else if (primaryChannel?.sendMessageReturningId) {
-            streamingMessageId = await primaryChannel.sendMessageReturningId(
-              primaryJid,
+          } else if (activeChannel1?.sendMessageReturningId) {
+            streamingMessageId = await activeChannel1.sendMessageReturningId(
+              activeJid1,
               completedText,
             );
             outputSentToUser = true;
           }
-        } else if (streamingMessageId && primaryChannel?.editMessage) {
-          // Streaming partial — text is the full accumulated text for this round.
-          // Prepend completedText (prior rounds + tool calls) for full display.
-          currentRoundText = text;
-          const fullText = completedText ? `${completedText}\n\n${text}` : text;
-          debouncedEdit(fullText);
-        } else if (primaryChannel?.sendMessageReturningId) {
-          // First partial — send initial message and track its ID
-          currentRoundText = text;
-          streamingMessageId = await primaryChannel.sendMessageReturningId(
-            primaryJid,
-            text,
-          );
-          outputSentToUser = true;
+        } else if (streamingMessageId) {
+          // Re-fetch active channel in case piped messages switched it
+          const { jid: activeJid2, channel: activeChannel2 } =
+            getActiveChannel();
+          if (activeChannel2?.editMessage) {
+            // Streaming partial — text is the full accumulated text for this round.
+            // Prepend completedText (prior rounds + tool calls) for full display.
+            currentRoundText = text;
+            const fullText = completedText
+              ? `${completedText}\n\n${text}`
+              : text;
+            debouncedEdit(fullText);
+          } else if (activeChannel2?.sendMessageReturningId) {
+            // First partial — send initial message and track its ID
+            currentRoundText = text;
+            streamingMessageId = await activeChannel2.sendMessageReturningId(
+              activeJid2,
+              text,
+            );
+            outputSentToUser = true;
+          }
         }
         // Channels without editing: skip partials silently
       } else {
@@ -645,7 +672,9 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
           clearTimeout(editDebounceTimer);
           editDebounceTimer = null;
         }
-        if (streamingMessageId && primaryChannel?.editMessage) {
+        // Re-fetch active channel in case piped messages switched it
+        const { jid: activeJid3, channel: activeChannel3 } = getActiveChannel();
+        if (streamingMessageId && activeChannel3?.editMessage) {
           // Build the full accumulated text (for chunking calculations)
           const fullText = completedText ? `${completedText}\n\n${text}` : text;
           // The continuation is what we're editing into the current message
@@ -669,13 +698,13 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
               if (remaining.length <= chunker.getThreshold()) {
                 // Last chunk fits
                 if (isFirstChunk) {
-                  await primaryChannel.editMessage(
-                    primaryJid,
+                  await activeChannel3.editMessage(
+                    activeJid3,
                     streamingMessageId,
                     remaining,
                   );
                 } else {
-                  await primaryChannel.sendMessage(primaryJid, remaining);
+                  await activeChannel3.sendMessage(activeJid3, remaining);
                 }
                 break;
               }
@@ -685,20 +714,20 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
                 chunker.getThreshold(),
               );
               if (isFirstChunk) {
-                await primaryChannel.editMessage(
-                  primaryJid,
+                await activeChannel3.editMessage(
+                  activeJid3,
                   streamingMessageId,
                   first,
                 );
                 isFirstChunk = false;
               } else {
-                await primaryChannel.sendMessage(primaryJid, first);
+                await activeChannel3.sendMessage(activeJid3, first);
               }
               remaining = rest;
             }
           } else {
-            await primaryChannel.editMessage(
-              primaryJid,
+            await activeChannel3.editMessage(
+              activeJid3,
               streamingMessageId,
               continuationText,
             );
@@ -709,7 +738,7 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
           splitPoint = 0;
         } else {
           // No streaming happened, or channel doesn't support it
-          await primaryChannel?.sendMessage(primaryJid, text);
+          await activeChannel3?.sendMessage(activeJid3, text);
         }
         outputSentToUser = true;
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
@@ -1054,6 +1083,40 @@ async function startMessageLoop(): Promise<void> {
               { groupFolder, count: normalMessages.length },
               'Piped messages to active container',
             );
+
+            // Check if any message is from a different channel and switch if needed
+            const activeJidKey = `active_jid:${groupFolder}`;
+            const currentActiveJid = getRouterState(activeJidKey);
+            for (const msg of normalMessages) {
+              if (msg.is_bot_message) continue;
+              const msgChannel = findChannel(channels, msg.chat_jid);
+              const currentChannel = currentActiveJid
+                ? findChannel(channels, currentActiveJid)
+                : null;
+              if (
+                msgChannel &&
+                (!currentChannel || msgChannel.name !== currentChannel.name)
+              ) {
+                debugLog('PIPED message channel switch', {
+                  group: group.name,
+                  previousChannel: currentChannel?.name,
+                  newChannel: msgChannel.name,
+                  newJid: msg.chat_jid,
+                });
+                logger.info(
+                  {
+                    group: group.name,
+                    previousChannel: currentChannel?.name,
+                    newChannel: msgChannel.name,
+                    newJid: msg.chat_jid,
+                  },
+                  'Piped message from different channel, switching',
+                );
+                setRouterState(activeJidKey, msg.chat_jid);
+                break; // Only switch once per bundle
+              }
+            }
+
             // Update cursors for all jids — advance past the WHOLE bundle
             // (including any interrupt commands we filtered out) so we don't
             // re-process them next poll cycle.
