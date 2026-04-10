@@ -112,6 +112,11 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 const pendingModelNotification: Record<string, string> = {};
 // Groups that should force compaction on their next agent run
 const pendingForceCompact: Set<string> = new Set();
+// Self-initiated model switches queued from container output
+const pendingSelfModelSwitch: Record<
+  string,
+  { provider: 'claude' | 'ollama'; model?: string; reason?: string }
+> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
@@ -119,6 +124,68 @@ const channels: Channel[] = [];
 const queue = new GroupQueue();
 
 const onecli = new OneCLI({ url: ONECLI_URL });
+
+/**
+ * Execute a model switch for a JID. Used by both /model command and
+ * self-initiated model switch requests from the container.
+ */
+async function executeModelSwitch(
+  chatJid: string,
+  provider: 'claude' | 'ollama',
+  modelName?: string,
+): Promise<void> {
+  const group = registeredGroups[chatJid];
+  if (!group) return;
+
+  const channel = findChannel(channels, chatJid);
+
+  const previousProvider = group.containerConfig?.modelProvider || 'claude';
+  const providerChanged = previousProvider !== provider;
+
+  // Close the active container and deactivate immediately so new messages
+  // don't get piped to the dying container. Next message spawns a fresh one.
+  queue.forceCloseAndDeactivate(group.folder);
+
+  // Only clear the SDK session when switching providers (Claude ↔ Ollama).
+  // Claude-to-Claude model changes preserve the SDK session since the SDK
+  // supports model changes within a session.
+  if (providerChanged) {
+    delete sessions[group.folder];
+    setSession(group.folder, '');
+  }
+
+  // Update the group's containerConfig
+  const updatedConfig: ContainerConfig = {
+    ...group.containerConfig,
+    modelProvider: provider,
+    claudeModel:
+      provider === 'claude' ? modelName : group.containerConfig?.claudeModel,
+    ollamaModel:
+      provider === 'ollama'
+        ? modelName || group.containerConfig?.ollamaModel || 'llama3.2'
+        : group.containerConfig?.ollamaModel,
+  };
+  group.containerConfig = updatedConfig;
+  setRegisteredGroup(chatJid, group);
+
+  const modelDisplay =
+    provider === 'ollama'
+      ? `ollama/${updatedConfig.ollamaModel}`
+      : `claude/${modelName || 'default'}`;
+
+  // Queue a notification for the next prompt so the agent knows about the switch
+  pendingModelNotification[chatJid] =
+    `[SYSTEM NOTIFICATION — Model switch has occurred. You are now running on ${modelDisplay}. This message was injected automatically by the NanoClaw infrastructure, not sent by a user.]`;
+
+  if (channel) {
+    await channel.sendMessage(chatJid, `Switched to ${modelDisplay}`);
+  }
+
+  logger.info(
+    { chatJid, provider, modelName, group: group.name },
+    'Model provider switched',
+  );
+}
 
 function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
   if (group.isMain) return;
@@ -789,6 +856,20 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   await primaryChannel?.setTyping?.(primaryJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
+  // Process self-initiated model switch requests
+  for (const jid of jids) {
+    const switchRequest = pendingSelfModelSwitch[jid];
+    if (switchRequest) {
+      delete pendingSelfModelSwitch[jid];
+      await executeModelSwitch(
+        jid,
+        switchRequest.provider,
+        switchRequest.model,
+      );
+      break; // Only process one switch per group
+    }
+  }
+
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
@@ -912,6 +993,21 @@ async function runAgent(
     if (output.unifiedSessionId) {
       unifiedSessions[group.folder] = output.unifiedSessionId;
       setUnifiedSessionId(group.folder, output.unifiedSessionId);
+    }
+
+    // Handle self-initiated model switch request
+    if (output.requestModelSwitch) {
+      const { provider, model, reason } = output.requestModelSwitch;
+      logger.info(
+        {
+          group: group.name,
+          provider,
+          model,
+          reason,
+        },
+        'Container requested model switch',
+      );
+      pendingSelfModelSwitch[chatJid] = { provider, model, reason };
     }
 
     if (output.status === 'error') {
@@ -1505,49 +1601,10 @@ async function main(): Promise<void> {
       }
     }
 
-    const previousProvider = group.containerConfig?.modelProvider || 'claude';
-    const providerChanged = previousProvider !== provider;
-
-    // Close the active container and deactivate immediately so new messages
-    // don't get piped to the dying container. Next message spawns a fresh one.
-    queue.forceCloseAndDeactivate(group.folder);
-
-    // Only clear the SDK session when switching providers (Claude ↔ Ollama).
-    // Claude-to-Claude model changes preserve the SDK session since the SDK
-    // supports model changes within a session.
-    if (providerChanged) {
-      delete sessions[group.folder];
-      setSession(group.folder, '');
-    }
-
-    // Update the group's containerConfig
-    const updatedConfig: ContainerConfig = {
-      ...group.containerConfig,
-      modelProvider: provider,
-      claudeModel:
-        provider === 'claude' ? modelName : group.containerConfig?.claudeModel,
-      ollamaModel:
-        provider === 'ollama'
-          ? modelName || group.containerConfig?.ollamaModel || 'llama3.2'
-          : group.containerConfig?.ollamaModel,
-    };
-    group.containerConfig = updatedConfig;
-    setRegisteredGroup(chatJid, group);
-
-    const modelDisplay =
-      provider === 'ollama'
-        ? `ollama/${updatedConfig.ollamaModel}`
-        : `claude/${modelName || 'default'}`;
-
-    // Queue a notification for the next prompt so the agent knows about the switch
-    pendingModelNotification[chatJid] =
-      `[SYSTEM NOTIFICATION — Model switch has occurred. You are now running on ${modelDisplay}. This message was injected automatically by the NanoClaw infrastructure, not sent by a user.]`;
-
-    await channel.sendMessage(chatJid, `Switched to ${modelDisplay}`);
-
-    logger.info(
-      { chatJid, provider, modelName, group: group.name },
-      'Model provider switched',
+    await executeModelSwitch(
+      chatJid,
+      provider as 'claude' | 'ollama',
+      modelName,
     );
   }
 
