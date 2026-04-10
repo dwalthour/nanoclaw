@@ -120,7 +120,12 @@ const pendingSelfModelSwitch: Record<
 // IPC-requested model switches keyed by group folder
 const pendingIpcModelSwitch: Record<
   string,
-  { provider: 'claude' | 'ollama'; model?: string; reason?: string }
+  {
+    provider: 'claude' | 'ollama';
+    model?: string;
+    reason?: string;
+    prompt?: string;
+  }
 > = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
@@ -900,6 +905,29 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
       ipcSwitchRequest.provider,
       ipcSwitchRequest.model,
     );
+    // If there's a prompt, queue it for processing by the next container spawn
+    if (ipcSwitchRequest.prompt) {
+      const promptPath = path.join(
+        GROUPS_DIR,
+        groupFolder,
+        'pending_prompt.json',
+      );
+      fs.writeFileSync(
+        promptPath,
+        JSON.stringify(
+          {
+            prompt: ipcSwitchRequest.prompt,
+            timestamp: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      );
+      logger.info(
+        { groupFolder, promptPath },
+        'Queued prompt for next container spawn',
+      );
+    }
   }
 
   if (output === 'error' || hadError) {
@@ -977,6 +1005,29 @@ async function runAgent(
       }
     : undefined;
 
+  // Check for pending prompt from IPC model_switch with prompt
+  const pendingPromptPath = path.join(
+    GROUPS_DIR,
+    group.folder,
+    'pending_prompt.json',
+  );
+  let pendingPrompt: string | undefined;
+  if (fs.existsSync(pendingPromptPath)) {
+    try {
+      const pendingPromptData = JSON.parse(
+        fs.readFileSync(pendingPromptPath, 'utf-8'),
+      );
+      pendingPrompt = pendingPromptData.prompt;
+      fs.unlinkSync(pendingPromptPath); // Consume it
+      logger.info(
+        { group: group.name, promptLength: pendingPrompt?.length },
+        'Loaded pending prompt from IPC model_switch',
+      );
+    } catch (err) {
+      logger.warn({ err, pendingPromptPath }, 'Failed to read pending prompt');
+    }
+  }
+
   // Inject pending model switch notification into the prompt
   let finalPrompt = prompt;
   if (pendingModelNotification[chatJid]) {
@@ -989,6 +1040,11 @@ async function runAgent(
     );
     finalPrompt = `${pendingModelNotification[chatJid]}\n\n${prompt}`;
     delete pendingModelNotification[chatJid];
+  }
+
+  // If there's a pending prompt (from IPC model_switch), use it instead
+  if (pendingPrompt) {
+    finalPrompt = pendingPrompt;
   }
 
   // Consume the force-compact flag if set
@@ -1854,9 +1910,10 @@ async function main(): Promise<void> {
       provider: 'claude' | 'ollama',
       model?: string,
       reason?: string,
+      prompt?: string,
     ) => {
       // Queue the model switch for the next container spawn
-      pendingIpcModelSwitch[groupFolder] = { provider, model, reason };
+      pendingIpcModelSwitch[groupFolder] = { provider, model, reason, prompt };
       return true;
     },
   });
