@@ -33,6 +33,7 @@ export interface IpcDeps {
     provider: 'claude' | 'ollama',
     model?: string,
     reason?: string,
+    prompt?: string,
   ) => boolean;
 }
 
@@ -214,6 +215,7 @@ export async function processTaskIpc(
     provider?: string;
     model?: string;
     reason?: string;
+    // prompt is shared by schedule_task and model_switch
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -509,11 +511,13 @@ export async function processTaskIpc(
         const provider = data.provider as 'claude' | 'ollama';
         const model = data.model;
         const reason = data.reason;
+        const prompt = data.prompt;
         const success = deps.requestModelSwitch(
           data.group_folder,
           provider,
           model,
           reason,
+          prompt,
         );
         if (success) {
           logger.info(
@@ -522,6 +526,7 @@ export async function processTaskIpc(
               provider,
               model,
               reason,
+              prompt: prompt ? `${prompt.substring(0, 50)}...` : undefined,
               sourceGroup,
             },
             'Model switch requested via IPC',
