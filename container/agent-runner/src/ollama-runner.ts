@@ -713,16 +713,6 @@ export async function runOllamaAgent(
         }
       }
     }
-    // Ollama Cloud models enforce a tighter effective limit than the model's
-    // reported context_length. Empirically: failed at ~100K estimated tokens
-    // ("exceeded by 3 tokens" error), worked fine at ~41K. Cap at 80K to keep
-    // compaction firing well before the degradation/overflow zone.
-    if (model.endsWith(':cloud') && contextWindowSize > 81920) {
-      log(
-        `Cloud model detected — capping context from ${contextWindowSize} to 81920 (empirical safe limit)`,
-      );
-      contextWindowSize = 81920;
-    }
     log(`Model context window: ${contextWindowSize} tokens`);
   } catch (err) {
     const msg = `Cannot reach Ollama at ${ollamaHost}: ${err instanceof Error ? err.message : String(err)}. Is Ollama running?`;
