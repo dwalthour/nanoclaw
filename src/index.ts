@@ -1592,11 +1592,6 @@ async function main(): Promise<void> {
             }
           }
         }
-        // Cloud models capped at 131072
-        if (model.endsWith(':cloud') && contextWindow > 131072) {
-          contextWindow = 131072;
-          contextSource = ' (capped for cloud)';
-        }
       } catch {
         contextWindow = 131072;
         contextSource = ' (default — could not query)';
