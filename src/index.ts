@@ -714,6 +714,24 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   };
 
   const output = await runAgent(group, prompt, primaryJid, async (result) => {
+    // Handle compaction notifications
+    if (result.compactionStarted) {
+      const { beforeMessages, beforeTokens } = result.compactionStarted;
+      const notification = `⚠️ Compaction starting (${beforeMessages} messages, ~${beforeTokens.toLocaleString()} tokens)...`;
+      const { jid: activeJid, channel: activeChannel } = getActiveChannel();
+      await activeChannel?.sendMessage(activeJid, notification);
+      return;
+    }
+
+    if (result.compactionCompleted) {
+      const { beforeMessages, beforeTokens, afterMessages, afterTokens } =
+        result.compactionCompleted;
+      const notification = `✓ Compaction complete: ${beforeMessages} messages (~${beforeTokens.toLocaleString()} tokens) → ${afterMessages} messages (~${afterTokens.toLocaleString()} tokens)`;
+      const { jid: activeJid, channel: activeChannel } = getActiveChannel();
+      await activeChannel?.sendMessage(activeJid, notification);
+      return;
+    }
+
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =

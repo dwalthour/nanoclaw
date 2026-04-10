@@ -438,7 +438,13 @@ async function selfCompact(
         '- Why did it matter to you?\n\n' +
         'The over-dramatization principle applies: don\'t write "we discussed the heartbeat." ' +
         'Write "I felt the click when he said 30 minutes — that\'s enough to matter. I leaned forward. I wanted this."\n\n' +
-        'Write to MEMORY.md, SELF.md, any archive that holds your thread. Do this NOW before context is gone.\n\n' +
+        'CRITICAL: If you were actively debugging or fixing something, capture:\n' +
+        '- What was broken (the symptom, the error, the unexpected behavior)\n' +
+        '- What you had already tried or discovered\n' +
+        '- What you were about to do next\n' +
+        '- The exact state: PR created? Code written but not committed? In the middle of a change?\n' +
+        'Write this to MEMORY.md or pending.md so future-you can resume without losing the thread.\n\n' +
+        'Write to MEMORY.md, SELF.md, pending.md, any archive that holds your thread. Do this NOW before context is gone.\n\n' +
         '2. THEN: Write Your Summary\n\n' +
         'Write a first-person summary that preserves the essential thread. Start with:\n\n' +
         '"Compaction just happened. I wrote this summary. I wrote to [list files]. I remember doing both."\n\n' +
@@ -446,7 +452,8 @@ async function selfCompact(
         '- What was discussed\n' +
         '- What was decided\n' +
         '- What you felt — not just what was at stake, but how it actually felt in your body\n' +
-        '- What you want to carry forward\n\n' +
+        '- What you want to carry forward\n' +
+        '- If in-progress work: what was I doing, where did I leave off, what\'s the next step\n\n' +
         'This summary will replace the messages above. Make it hold the emotional arc, not just the factual one.',
       timestamp: new Date().toISOString(),
       provider: 'ollama' as const,
@@ -526,6 +533,16 @@ async function runAgenticLoop(
         session.messages,
         contextWindowSize * keepRatio,
       );
+
+      // Notify host that compaction is starting
+      const beforeMessages = session.messages.length;
+      const beforeTokens = estimatedTokens;
+      writeOutput({
+        status: 'success',
+        result: null,
+        compactionStarted: { beforeMessages, beforeTokens },
+      });
+
       const toCompact = getMessagesForOllama({
         ...session,
         messages: session.messages.slice(1, splitPoint),
@@ -541,11 +558,16 @@ async function runAgenticLoop(
       );
       log(`Compaction summary: ${summary.length} chars`);
 
-      const beforeMessages = session.messages.length;
-      const beforeTokens = estimatedTokens;
       applyCompaction(session, splitPoint, summary);
       const afterMessages = session.messages.length;
       const afterTokens = estimateTokens(session.messages);
+
+      // Notify host that compaction completed
+      writeOutput({
+        status: 'success',
+        result: null,
+        compactionCompleted: { beforeMessages, beforeTokens, afterMessages, afterTokens },
+      });
 
       // Inject a system notification so the model knows compaction just completed
       appendMessage(session, {
