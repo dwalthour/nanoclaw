@@ -28,6 +28,12 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  requestModelSwitch: (
+    groupFolder: string,
+    provider: 'claude' | 'ollama',
+    model?: string,
+    reason?: string,
+  ) => boolean;
 }
 
 let ipcWatcherRunning = false;
@@ -203,6 +209,11 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For model_switch
+    group_folder?: string;
+    provider?: string;
+    model?: string;
+    reason?: string;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -488,6 +499,43 @@ export async function processTaskIpc(
         logger.warn(
           { data },
           'Invalid register_group request - missing required fields',
+        );
+      }
+      break;
+
+    case 'model_switch':
+      // Request a model switch for the next container spawn
+      if (data.provider && data.group_folder) {
+        const provider = data.provider as 'claude' | 'ollama';
+        const model = data.model;
+        const reason = data.reason;
+        const success = deps.requestModelSwitch(
+          data.group_folder,
+          provider,
+          model,
+          reason,
+        );
+        if (success) {
+          logger.info(
+            {
+              groupFolder: data.group_folder,
+              provider,
+              model,
+              reason,
+              sourceGroup,
+            },
+            'Model switch requested via IPC',
+          );
+        } else {
+          logger.warn(
+            { groupFolder: data.group_folder, sourceGroup },
+            'Model switch request failed - no active container',
+          );
+        }
+      } else {
+        logger.warn(
+          { data },
+          'Invalid model_switch request - missing required fields',
         );
       }
       break;

@@ -117,6 +117,11 @@ const pendingSelfModelSwitch: Record<
   string,
   { provider: 'claude' | 'ollama'; model?: string; reason?: string }
 > = {};
+// IPC-requested model switches keyed by group folder
+const pendingIpcModelSwitch: Record<
+  string,
+  { provider: 'claude' | 'ollama'; model?: string; reason?: string }
+> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
@@ -881,6 +886,20 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
       );
       break; // Only process one switch per group
     }
+  }
+
+  // Process IPC-requested model switches (keyed by group folder)
+  const ipcSwitchRequest = pendingIpcModelSwitch[groupFolder];
+  if (ipcSwitchRequest) {
+    delete pendingIpcModelSwitch[groupFolder];
+    // Use the active JID for this group folder
+    const activeJidKey = `active_jid:${groupFolder}`;
+    const activeJid = getRouterState(activeJidKey) || primaryJid;
+    await executeModelSwitch(
+      activeJid,
+      ipcSwitchRequest.provider,
+      ipcSwitchRequest.model,
+    );
   }
 
   if (output === 'error' || hadError) {
@@ -1829,6 +1848,16 @@ async function main(): Promise<void> {
       for (const group of Object.values(registeredGroups)) {
         writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
       }
+    },
+    requestModelSwitch: (
+      groupFolder: string,
+      provider: 'claude' | 'ollama',
+      model?: string,
+      reason?: string,
+    ) => {
+      // Queue the model switch for the next container spawn
+      pendingIpcModelSwitch[groupFolder] = { provider, model, reason };
+      return true;
     },
   });
   queue.setProcessMessagesFn(processGroupMessages);
