@@ -662,6 +662,10 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
               completedText,
             );
             outputSentToUser = true;
+          } else if (activeChannel1?.sendMessage) {
+            // Channel doesn't support editing (e.g., Signal) - send tool info as new message
+            await activeChannel1.sendMessage(activeJid1, completedText);
+            outputSentToUser = true;
           }
         } else if (streamingMessageId) {
           // Re-fetch active channel in case piped messages switched it
