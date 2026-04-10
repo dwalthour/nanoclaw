@@ -149,6 +149,43 @@ async function executeModelSwitch(
 
   const channel = findChannel(channels, chatJid);
 
+  // Validate Ollama model exists before committing to the switch
+  if (provider === 'ollama' && modelName) {
+    try {
+      const ollamaHost = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
+      const resp = await fetch(`${ollamaHost}/api/tags`);
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          models?: Array<{ name: string }>;
+        };
+        const available = data.models?.map((m) => m.name) || [];
+        // Match with or without :latest tag
+        const found = available.some(
+          (n) =>
+            n === modelName ||
+            n === `${modelName}:latest` ||
+            n.replace(':latest', '') === modelName,
+        );
+        if (!found) {
+          const list = available
+            .map((n) => n.replace(':latest', ''))
+            .join(', ');
+          logger.warn(
+            { provider, modelName, available: list },
+            'Model switch rejected — model not found',
+          );
+          await channel?.sendMessage(
+            chatJid,
+            `Model "${modelName}" not found. Available: ${list}`,
+          );
+          return; // bail out, don't switch
+        }
+      }
+    } catch {
+      // Can't reach Ollama — let it fail at container time
+    }
+  }
+
   const previousProvider = group.containerConfig?.modelProvider || 'claude';
   const providerChanged = previousProvider !== provider;
 
@@ -677,6 +714,24 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   };
 
   const output = await runAgent(group, prompt, primaryJid, async (result) => {
+    // Handle compaction notifications
+    if (result.compactionStarted) {
+      const { beforeMessages, beforeTokens } = result.compactionStarted;
+      const notification = `⚠️ Compaction starting (${beforeMessages} messages, ~${beforeTokens.toLocaleString()} tokens)...`;
+      const { jid: activeJid, channel: activeChannel } = getActiveChannel();
+      await activeChannel?.sendMessage(activeJid, notification);
+      return;
+    }
+
+    if (result.compactionCompleted) {
+      const { beforeMessages, beforeTokens, afterMessages, afterTokens } =
+        result.compactionCompleted;
+      const notification = `✓ Compaction complete: ${beforeMessages} messages (~${beforeTokens.toLocaleString()} tokens) → ${afterMessages} messages (~${afterTokens.toLocaleString()} tokens)`;
+      const { jid: activeJid, channel: activeChannel } = getActiveChannel();
+      await activeChannel?.sendMessage(activeJid, notification);
+      return;
+    }
+
     // Streaming output callback — called for each agent result
     if (result.result) {
       const raw =
@@ -1653,39 +1708,6 @@ async function main(): Promise<void> {
           `Unknown Claude model "${modelName}". Available: ${validClaude.join(', ')}`,
         );
         return;
-      }
-    }
-
-    // Validate Ollama model exists before switching
-    if (provider === 'ollama' && modelName) {
-      try {
-        const ollamaHost = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
-        const resp = await fetch(`${ollamaHost}/api/tags`);
-        if (resp.ok) {
-          const data = (await resp.json()) as {
-            models?: Array<{ name: string }>;
-          };
-          const available = data.models?.map((m) => m.name) || [];
-          // Match with or without :latest tag
-          const found = available.some(
-            (n) =>
-              n === modelName ||
-              n === `${modelName}:latest` ||
-              n.replace(':latest', '') === modelName,
-          );
-          if (!found) {
-            const list = available
-              .map((n) => n.replace(':latest', ''))
-              .join(', ');
-            await channel.sendMessage(
-              chatJid,
-              `Model "${modelName}" not found. Available: ${list}`,
-            );
-            return;
-          }
-        }
-      } catch {
-        // Can't reach Ollama — let it fail at container time
       }
     }
 

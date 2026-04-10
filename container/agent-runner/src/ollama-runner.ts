@@ -526,6 +526,16 @@ async function runAgenticLoop(
         session.messages,
         contextWindowSize * keepRatio,
       );
+
+      // Notify host that compaction is starting
+      const beforeMessages = session.messages.length;
+      const beforeTokens = estimatedTokens;
+      writeOutput({
+        status: 'success',
+        result: null,
+        compactionStarted: { beforeMessages, beforeTokens },
+      });
+
       const toCompact = getMessagesForOllama({
         ...session,
         messages: session.messages.slice(1, splitPoint),
@@ -541,11 +551,16 @@ async function runAgenticLoop(
       );
       log(`Compaction summary: ${summary.length} chars`);
 
-      const beforeMessages = session.messages.length;
-      const beforeTokens = estimatedTokens;
       applyCompaction(session, splitPoint, summary);
       const afterMessages = session.messages.length;
       const afterTokens = estimateTokens(session.messages);
+
+      // Notify host that compaction completed
+      writeOutput({
+        status: 'success',
+        result: null,
+        compactionCompleted: { beforeMessages, beforeTokens, afterMessages, afterTokens },
+      });
 
       // Inject a system notification so the model knows compaction just completed
       appendMessage(session, {
