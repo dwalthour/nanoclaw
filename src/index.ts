@@ -646,21 +646,24 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
           editDebounceTimer = null;
         }
         if (streamingMessageId && primaryChannel?.editMessage) {
-          // Edit the streaming message one final time with complete text,
-          // including any accumulated text from before tool calls
-          let fullText = completedText ? `${completedText}\n\n${text}` : text;
+          // Build the full accumulated text (for chunking calculations)
+          const fullText = completedText ? `${completedText}\n\n${text}` : text;
+          // The continuation is what we're editing into the current message
+          // (text after splitPoint, which was already sent in previous chunks)
+          const continuationText = fullText.slice(splitPoint);
 
-          // Check if final output exceeds threshold and needs chunking
-          const check = chunker.checkThreshold('', fullText);
           debugLog('Final output', {
             fullTextLength: fullText.length,
-            needsChunk: check.needsChunk,
-            threshold: check.threshold,
+            splitPoint,
+            continuationLength: continuationText.length,
+            needsChunk: continuationText.length >= chunker.getThreshold(),
+            threshold: chunker.getThreshold(),
           });
 
-          if (check.needsChunk) {
+          // Check if continuation needs chunking
+          if (continuationText.length >= chunker.getThreshold()) {
             // Split and send in chunks
-            let remaining = fullText;
+            let remaining = continuationText;
             let isFirstChunk = true;
             while (remaining.length > 0) {
               if (remaining.length <= chunker.getThreshold()) {
@@ -697,7 +700,7 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
             await primaryChannel.editMessage(
               primaryJid,
               streamingMessageId,
-              fullText,
+              continuationText,
             );
           }
           streamingMessageId = null;
