@@ -280,16 +280,35 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
 
   const checkHeartbeats = async () => {
     const groups = deps.registeredGroups();
+
+    // Group JIDs by folder to avoid duplicate heartbeats for multi-channel groups
+    const folders = new Map<
+      string,
+      { jids: string[]; group: RegisteredGroup }
+    >();
     for (const [jid, group] of Object.entries(groups)) {
-      const heartbeatPath = path.join(GROUPS_DIR, group.folder, 'HEARTBEAT.md');
+      const folder = group.folder;
+      if (!folders.has(folder)) {
+        folders.set(folder, { jids: [], group });
+      }
+      folders.get(folder)!.jids.push(jid);
+    }
+
+    for (const [folder, { jids, group }] of folders) {
+      const heartbeatPath = path.join(GROUPS_DIR, folder, 'HEARTBEAT.md');
       if (!fs.existsSync(heartbeatPath)) continue;
 
       const now = Date.now();
-      const lastBeat = lastHeartbeat[group.folder] || startupTime;
+      const lastBeat = lastHeartbeat[folder] || startupTime;
       if (now - lastBeat < HEARTBEAT_INTERVAL) continue;
 
+      // Determine which JID to send heartbeat to
+      // For multi-channel groups, use the active channel from router state
+      const activeJidKey = `active_jid:${folder}`;
+      const activeJid = getRouterState(activeJidKey) || jids[0];
+
       // Skip if there has been recent direct interaction
-      const lastMsg = getLastMessageTimestamp(jid);
+      const lastMsg = getLastMessageTimestamp(activeJid);
       if (lastMsg) {
         const lastMsgAge = now - new Date(lastMsg).getTime();
         if (lastMsgAge < HEARTBEAT_QUIET_PERIOD_MS) {
@@ -301,7 +320,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
       }
 
-      lastHeartbeat[group.folder] = now;
+      lastHeartbeat[folder] = now;
 
       try {
         const heartbeatContent = fs.readFileSync(heartbeatPath, 'utf-8').trim();
@@ -310,9 +329,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         const prompt = `[HEARTBEAT — This is an automated periodic check-in, not a user message.]\n\n${heartbeatContent}`;
 
         // Try to pipe into the active container first
-        if (deps.queue.sendMessage(jid, prompt)) {
+        if (deps.queue.sendMessage(activeJid, prompt)) {
           logger.info(
-            { group: group.name, folder: group.folder },
+            { group: group.name, folder, activeJid },
             'Heartbeat piped to active container',
           );
           continue;
@@ -321,12 +340,12 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         // No active container — store as a synthetic message so the normal
         // message processing loop picks it up and spawns a container.
         logger.info(
-          { group: group.name, folder: group.folder },
+          { group: group.name, folder, activeJid },
           'Heartbeat spawning new container',
         );
         storeMessage({
           id: `heartbeat-${Date.now()}`,
-          chat_jid: jid,
+          chat_jid: activeJid,
           sender: '[System]',
           sender_name: '[System]',
           content: prompt,
@@ -334,7 +353,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           is_from_me: false,
           is_bot_message: false,
         });
-        deps.queue.enqueueMessageCheck(jid);
+        deps.queue.enqueueMessageCheck(activeJid);
       } catch (err) {
         logger.error({ err, group: group.name }, 'Error processing heartbeat');
       }
