@@ -20,6 +20,7 @@ import {
   getDueTasks,
   getLastMessageTimestamp,
   getTaskById,
+  getRouterState,
   logTaskRun,
   storeMessage,
   updateTask,
@@ -205,8 +206,12 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
+          // Check if there's an active channel from recent messages
+          // (for unified sessions where multiple channels share one folder)
+          const activeJidKey = `active_jid:${task.group_folder}`;
+          const activeJid = getRouterState(activeJidKey) || task.chat_jid;
           // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          await deps.sendMessage(activeJid, streamedOutput.result);
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
