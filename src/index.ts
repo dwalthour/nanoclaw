@@ -193,7 +193,11 @@ async function executeModelSwitch(
     }
   }
 
-  const previousProvider = group.containerConfig?.modelProvider || 'claude';
+  // Read current config from FolderStateStore (canonical source)
+  const currentState = folderState.get(group.folder);
+  const currentConfig =
+    currentState?.containerConfig || group.containerConfig || {};
+  const previousProvider = currentConfig.modelProvider || 'claude';
   const providerChanged = previousProvider !== provider;
 
   // Close the active container and deactivate immediately so new messages
@@ -208,16 +212,15 @@ async function executeModelSwitch(
     setSession(group.folder, '');
   }
 
-  // Update the group's containerConfig
+  // Build the updated config from FolderStateStore's canonical config
   const updatedConfig: ContainerConfig = {
-    ...group.containerConfig,
+    ...currentConfig,
     modelProvider: provider,
-    claudeModel:
-      provider === 'claude' ? modelName : group.containerConfig?.claudeModel,
+    claudeModel: provider === 'claude' ? modelName : currentConfig.claudeModel,
     ollamaModel:
       provider === 'ollama'
-        ? modelName || group.containerConfig?.ollamaModel || 'llama3.2'
-        : group.containerConfig?.ollamaModel,
+        ? modelName || currentConfig.ollamaModel || 'llama3.2'
+        : currentConfig.ollamaModel,
   };
   group.containerConfig = updatedConfig;
   setRegisteredGroup(chatJid, group);
@@ -438,10 +441,15 @@ export function _setRegisteredGroups(
  * Now takes groupFolder instead of chatJid to support unified sessions.
  */
 async function processGroupMessages(groupFolder: string): Promise<boolean> {
-  // Use group with containerConfig if available (for unified sessions where
-  // one JID may have config and another may not)
-  const group = getGroupWithConfigForFolder(groupFolder);
+  // Get the canonical folder state (config, active channel) from FolderStateStore
+  const state = folderState.get(groupFolder);
+  const group = getGroupForFolder(groupFolder);
   if (!group) return true;
+
+  // Overlay folder-level containerConfig onto the group object for downstream use
+  if (state?.containerConfig) {
+    group.containerConfig = state.containerConfig;
+  }
 
   // Get all JIDs that share this folder (for unified sessions)
   const jids = getJidsForFolder(groupFolder);
@@ -452,11 +460,11 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   let primaryJid = jids[0];
   let primaryChannel = findChannel(channels, primaryJid);
 
-  // Helper to get the current active channel from router state
+  // Helper to get the current active channel from FolderStateStore
   // This allows piped messages to switch channels mid-stream
   const getActiveChannel = () => {
-    const activeJidKey = `active_jid:${groupFolder}`;
-    const activeJid = getRouterState(activeJidKey);
+    const currentState = folderState.get(groupFolder);
+    const activeJid = currentState?.activeChannelJid;
     if (activeJid) {
       const channel = findChannel(channels, activeJid);
       if (channel) {
@@ -499,9 +507,8 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   if (missedMessages.length === 0) return true;
 
   // Stable active channel: track which channel the user is actively using
-  // Key: active_jid:<folder>, Value: the JID of the active channel
-  const activeJidKey = `active_jid:${groupFolder}`;
-  const previousActiveJid = getRouterState(activeJidKey);
+  // Read from FolderStateStore (canonical source)
+  const previousActiveJid = state?.activeChannelJid || null;
   let activeJid = previousActiveJid;
 
   debugLog('Processing bundle', {
@@ -548,8 +555,8 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
       (!currentChannel || msgChannel.name !== currentChannel.name)
     ) {
       activeJid = msg.chat_jid;
-      setRouterState(activeJidKey, activeJid);
-      folderState.setActiveChannel(groupFolder, activeJid); // dual-write
+      folderState.setActiveChannel(groupFolder, activeJid);
+      setRouterState(`active_jid:${groupFolder}`, activeJid); // dual-write (legacy)
       debugLog('SWITCHED active channel', {
         group: group.name,
         newChannel: msgChannel.name,
@@ -567,8 +574,8 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   if (!activeJid) {
     const lastMessage = missedMessages[missedMessages.length - 1];
     activeJid = lastMessage.chat_jid;
-    setRouterState(activeJidKey, activeJid);
-    folderState.setActiveChannel(groupFolder, activeJid); // dual-write
+    folderState.setActiveChannel(groupFolder, activeJid);
+    setRouterState(`active_jid:${groupFolder}`, activeJid); // dual-write (legacy)
     debugLog('First time setting active channel', {
       group: group.name,
       activeJid,
@@ -977,9 +984,9 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   const ipcSwitchRequest = pendingIpcModelSwitch[groupFolder];
   if (ipcSwitchRequest) {
     delete pendingIpcModelSwitch[groupFolder];
-    // Use the active JID for this group folder
-    const activeJidKey = `active_jid:${groupFolder}`;
-    const activeJid = getRouterState(activeJidKey) || primaryJid;
+    // Use the active JID for this group folder (from FolderStateStore)
+    const ipcState = folderState.get(groupFolder);
+    const activeJid = ipcState?.activeChannelJid || primaryJid;
     await executeModelSwitch(
       activeJid,
       ipcSwitchRequest.provider,
@@ -1168,9 +1175,17 @@ async function runAgent(
     pendingForceCompact.delete(chatJid);
   }
 
+  // Read config from FolderStateStore (canonical source) for container spawn
+  const spawnState = folderState.get(group.folder);
+  const spawnConfig =
+    spawnState?.containerConfig || group.containerConfig || {};
+
+  // Overlay canonical config onto group for container-runner (additionalMounts, timeout, etc.)
+  const spawnGroup = { ...group, containerConfig: spawnConfig };
+
   try {
     const output = await runContainerAgent(
-      group,
+      spawnGroup,
       {
         prompt: finalPrompt,
         sessionId,
@@ -1178,9 +1193,9 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
-        modelProvider: group.containerConfig?.modelProvider,
-        claudeModel: group.containerConfig?.claudeModel,
-        ollamaModel: group.containerConfig?.ollamaModel,
+        modelProvider: spawnConfig.modelProvider,
+        claudeModel: spawnConfig.claudeModel,
+        ollamaModel: spawnConfig.ollamaModel,
         unifiedSessionId: unifiedSessions[group.folder],
         forceCompact,
       },
@@ -1417,8 +1432,8 @@ async function startMessageLoop(): Promise<void> {
             );
 
             // Check if any message is from a different channel and switch if needed
-            const activeJidKey = `active_jid:${groupFolder}`;
-            const currentActiveJid = getRouterState(activeJidKey);
+            const pipedState = folderState.get(groupFolder);
+            const currentActiveJid = pipedState?.activeChannelJid || null;
             for (const msg of normalMessages) {
               if (msg.is_bot_message) continue;
               const msgChannel = findChannel(channels, msg.chat_jid);
@@ -1444,8 +1459,8 @@ async function startMessageLoop(): Promise<void> {
                   },
                   'Piped message from different channel, switching',
                 );
-                setRouterState(activeJidKey, msg.chat_jid);
-                folderState.setActiveChannel(groupFolder, msg.chat_jid); // dual-write
+                folderState.setActiveChannel(groupFolder, msg.chat_jid);
+                setRouterState(`active_jid:${groupFolder}`, msg.chat_jid); // dual-write (legacy)
                 break; // Only switch once per bundle
               }
             }
@@ -1559,10 +1574,15 @@ async function main(): Promise<void> {
     const channel = findChannel(channels, chatJid);
     if (!channel) return;
 
+    // Read config from FolderStateStore (canonical source)
+    const thinkState = folderState.get(group.folder);
+    const currentConfig =
+      thinkState?.containerConfig || group.containerConfig || {};
+
     const arg = command.trim().split(/\s+/)[1]?.toLowerCase();
 
     if (arg !== 'on' && arg !== 'off') {
-      const current = group.containerConfig?.showThinking ? 'on' : 'off';
+      const current = currentConfig.showThinking ? 'on' : 'off';
       await channel.sendMessage(
         chatJid,
         `Thinking display: ${current}\nUsage: /think on  or  /think off`,
@@ -1572,9 +1592,12 @@ async function main(): Promise<void> {
 
     const showThinking = arg === 'on';
     const updatedConfig: ContainerConfig = {
-      ...group.containerConfig,
+      ...currentConfig,
       showThinking,
     };
+
+    // Write to FolderStateStore (canonical) + registered_groups (legacy dual-write)
+    folderState.setContainerConfig(group.folder, updatedConfig);
     group.containerConfig = updatedConfig;
     setRegisteredGroup(chatJid, group);
 
@@ -1591,6 +1614,10 @@ async function main(): Promise<void> {
     if (!group) return;
     const channel = findChannel(channels, chatJid);
     if (!channel) return;
+
+    // Read config from FolderStateStore (canonical source)
+    const ctxState = folderState.get(group.folder);
+    const config = ctxState?.containerConfig || group.containerConfig || {};
 
     // Find the most recent unified session file for this group
     const sessionsDir = path.join(GROUPS_DIR, group.folder, '.sessions');
@@ -1639,9 +1666,9 @@ async function main(): Promise<void> {
     // Try to detect the model's effective context window
     let contextWindow = 0;
     let contextSource = '';
-    const provider = group.containerConfig?.modelProvider || 'claude';
+    const provider = config.modelProvider || 'claude';
     if (provider === 'ollama') {
-      const model = group.containerConfig?.ollamaModel || 'unknown';
+      const model = config.ollamaModel || 'unknown';
       try {
         const ollamaHost = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
         const resp = await fetch(`${ollamaHost}/api/show`, {
@@ -1671,7 +1698,7 @@ async function main(): Promise<void> {
       }
     } else {
       // Claude — best-effort defaults
-      const claudeModel = group.containerConfig?.claudeModel || 'sonnet';
+      const claudeModel = config.claudeModel || 'sonnet';
       contextWindow = claudeModel.includes('opus') ? 1_000_000 : 200_000;
       contextSource = ' (model default)';
     }
@@ -1704,7 +1731,12 @@ async function main(): Promise<void> {
     const channel = findChannel(channels, chatJid);
     if (!channel) return;
 
-    const provider = group.containerConfig?.modelProvider || 'claude';
+    // Read config from FolderStateStore (canonical source)
+    const compactState = folderState.get(group.folder);
+    const provider =
+      compactState?.containerConfig?.modelProvider ||
+      group.containerConfig?.modelProvider ||
+      'claude';
     if (provider !== 'ollama') {
       await channel.sendMessage(
         chatJid,
@@ -1742,9 +1774,13 @@ async function main(): Promise<void> {
     const provider = parts[1]?.toLowerCase();
 
     if (provider !== 'claude' && provider !== 'ollama') {
-      const current = group.containerConfig?.modelProvider || 'claude';
-      const claudeModel = group.containerConfig?.claudeModel || 'default';
-      const ollamaModel = group.containerConfig?.ollamaModel || '';
+      // Read config from FolderStateStore (canonical source)
+      const switchState = folderState.get(group.folder);
+      const switchConfig =
+        switchState?.containerConfig || group.containerConfig || {};
+      const current = switchConfig.modelProvider || 'claude';
+      const claudeModel = switchConfig.claudeModel || 'default';
+      const ollamaModel = switchConfig.ollamaModel || '';
       const display =
         current === 'ollama'
           ? `ollama/${ollamaModel}`
