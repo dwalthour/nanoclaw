@@ -222,22 +222,12 @@ async function executeModelSwitch(
         ? modelName || currentConfig.ollamaModel || 'llama3.2'
         : currentConfig.ollamaModel,
   };
+  // Write to FolderStateStore (canonical source of truth)
+  folderState.setContainerConfig(group.folder, updatedConfig);
+
+  // Legacy: update the triggering JID's row (for backwards compatibility during transition)
   group.containerConfig = updatedConfig;
   setRegisteredGroup(chatJid, group);
-
-  // Propagate containerConfig to all sibling JIDs sharing this folder
-  // so spawns from any channel use the correct model config
-  for (const siblingJid of getJidsForFolder(group.folder)) {
-    if (siblingJid === chatJid) continue;
-    const sibling = registeredGroups[siblingJid];
-    if (sibling) {
-      sibling.containerConfig = updatedConfig;
-      setRegisteredGroup(siblingJid, sibling);
-    }
-  }
-
-  // Dual-write: update centralized folder state (canonical source of truth)
-  folderState.setContainerConfig(group.folder, updatedConfig);
 
   const modelDisplay =
     provider === 'ollama'
@@ -296,25 +286,6 @@ function getGroupForFolder(folder: string): RegisteredGroup | undefined {
     if (group.folder === folder) return group;
   }
   return undefined;
-}
-
-/**
- * Find a group for a folder that has containerConfig set.
- * For unified sessions, multiple JIDs may share the same folder, but only some
- * may have containerConfig populated (e.g., Telegram row has it, Signal row doesn't).
- * Returns the first group with containerConfig, falling back to any group for the folder.
- */
-function getGroupWithConfigForFolder(
-  folder: string,
-): RegisteredGroup | undefined {
-  let fallback: RegisteredGroup | undefined;
-  for (const group of Object.values(registeredGroups)) {
-    if (group.folder === folder) {
-      if (group.containerConfig) return group;
-      if (!fallback) fallback = group;
-    }
-  }
-  return fallback;
 }
 
 function loadState(): void {
@@ -556,7 +527,6 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     ) {
       activeJid = msg.chat_jid;
       folderState.setActiveChannel(groupFolder, activeJid);
-      setRouterState(`active_jid:${groupFolder}`, activeJid); // dual-write (legacy)
       debugLog('SWITCHED active channel', {
         group: group.name,
         newChannel: msgChannel.name,
@@ -575,7 +545,6 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     const lastMessage = missedMessages[missedMessages.length - 1];
     activeJid = lastMessage.chat_jid;
     folderState.setActiveChannel(groupFolder, activeJid);
-    setRouterState(`active_jid:${groupFolder}`, activeJid); // dual-write (legacy)
     debugLog('First time setting active channel', {
       group: group.name,
       activeJid,
@@ -1460,7 +1429,6 @@ async function startMessageLoop(): Promise<void> {
                   'Piped message from different channel, switching',
                 );
                 folderState.setActiveChannel(groupFolder, msg.chat_jid);
-                setRouterState(`active_jid:${groupFolder}`, msg.chat_jid); // dual-write (legacy)
                 break; // Only switch once per bundle
               }
             }
@@ -1596,10 +1564,8 @@ async function main(): Promise<void> {
       showThinking,
     };
 
-    // Write to FolderStateStore (canonical) + registered_groups (legacy dual-write)
+    // Write to FolderStateStore (canonical source of truth)
     folderState.setContainerConfig(group.folder, updatedConfig);
-    group.containerConfig = updatedConfig;
-    setRegisteredGroup(chatJid, group);
 
     await channel.sendMessage(chatJid, `Thinking display: ${arg}`);
 
