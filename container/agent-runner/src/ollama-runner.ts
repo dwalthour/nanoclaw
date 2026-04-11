@@ -181,6 +181,38 @@ function injectVisionImages(
   });
 }
 
+// Cache vision capability per model to avoid querying /api/show on every turn.
+const visionCapabilityCache = new Map<string, boolean>();
+
+async function modelSupportsVision(
+  ollamaHost: string,
+  model: string,
+): Promise<boolean> {
+  if (visionCapabilityCache.has(model)) {
+    return visionCapabilityCache.get(model)!;
+  }
+  try {
+    const resp = await fetch(`${ollamaHost}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: model }),
+    });
+    if (!resp.ok) {
+      visionCapabilityCache.set(model, false);
+      return false;
+    }
+    const data = (await resp.json()) as { capabilities?: string[] };
+    const supported = data.capabilities?.includes('vision') ?? false;
+    visionCapabilityCache.set(model, supported);
+    log(`Vision capability for ${model}: ${supported}`);
+    return supported;
+  } catch {
+    // Can't reach Ollama or model not found — fail closed (no injection)
+    visionCapabilityCache.set(model, false);
+    return false;
+  }
+}
+
 async function callOllama(
   ollamaHost: string,
   model: string,
@@ -585,8 +617,12 @@ async function runAgenticLoop(
 
     let messages = getMessagesForOllama(session) as OllamaChatMessage[];
 
-    // Inject base64-encoded images for vision-capable models
-    messages = injectVisionImages(messages);
+    // Only inject binary image data when the current model supports vision.
+    // Without this check, historical [Photo] markers get re-encoded on every
+    // turn and Ollama text-only models reject the whole request with HTTP 400.
+    if (await modelSupportsVision(ollamaHost, model)) {
+      messages = injectVisionImages(messages);
+    }
 
     log(
       `Ollama call #${rounds} (${messages.length} messages, model: ${model})`,
