@@ -635,13 +635,33 @@ export class SignalChannel implements Channel {
       })
       .filter((a): a is NonNullable<typeof a> => a !== null);
 
+    // Format message content with attachment placeholders (like Telegram)
+    // This ensures vision models receive the image path in the expected format
+    let formattedContent = content;
+    if (attachments && attachments.length > 0) {
+      const attachmentPlaceholders = attachments
+        .map((att) => {
+          const placeholder =
+            att.type === 'image'
+              ? '[Photo]'
+              : att.type === 'video'
+                ? '[Video]'
+                : att.type === 'audio'
+                  ? '[Audio]'
+                  : '[Document]';
+          return `${placeholder} (${att.path})`;
+        })
+        .join(' ');
+      formattedContent = `${attachmentPlaceholders}${content ? ` ${content}` : ''}`;
+    }
+
     // Deliver message — startMessageLoop() will pick it up
     this.opts.onMessage(chatJid, {
       id: msgId,
       chat_jid: chatJid,
       sender: sourceUuid || sourceNumber,
       sender_name: sourceName,
-      content,
+      content: formattedContent,
       timestamp,
       is_from_me: false,
       reply_to_message_id: replyToMessageId,
