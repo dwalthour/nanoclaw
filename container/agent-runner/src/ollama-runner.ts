@@ -153,6 +153,11 @@ function injectVisionImages(
   messages: OllamaChatMessage[],
 ): OllamaChatMessage[] {
   const imagePathRegex = /\[Photo\]\s*\(([^)]+\.(?:jpg|jpeg|png|gif|webp))\)/gi;
+  // Track which paths have already been encoded for THIS request, so the
+  // same image isn't shipped multiple times when it's referenced in
+  // multiple historical messages. Closure-scoped to one injectVisionImages
+  // call, so cross-request encoding isn't affected.
+  const encodedPaths = new Set<string>();
 
   return messages.map((msg) => {
     if (msg.role !== 'user') return msg;
@@ -163,6 +168,11 @@ function injectVisionImages(
     const images: string[] = [];
     for (const match of matches) {
       const filePath = match[1];
+      if (encodedPaths.has(filePath)) {
+        continue; // already encoded for this request — skip
+      }
+      encodedPaths.add(filePath);
+
       try {
         if (fs.existsSync(filePath)) {
           const data = fs.readFileSync(filePath);
