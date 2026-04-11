@@ -215,6 +215,17 @@ async function executeModelSwitch(
   group.containerConfig = updatedConfig;
   setRegisteredGroup(chatJid, group);
 
+  // Propagate containerConfig to all sibling JIDs sharing this folder
+  // so spawns from any channel use the correct model config
+  for (const siblingJid of getJidsForFolder(group.folder)) {
+    if (siblingJid === chatJid) continue;
+    const sibling = registeredGroups[siblingJid];
+    if (sibling) {
+      sibling.containerConfig = updatedConfig;
+      setRegisteredGroup(siblingJid, sibling);
+    }
+  }
+
   const modelDisplay =
     provider === 'ollama'
       ? `ollama/${updatedConfig.ollamaModel}`
