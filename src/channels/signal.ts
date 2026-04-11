@@ -216,7 +216,17 @@ function resolveSignalAttachment(
   attachmentId: string,
   mimeType?: string,
 ): string | null {
-  // Extension from MIME type
+  // The signal-cli attachments directory is mounted at /workspace/signal-attachments
+  const signalAttachDir = '/workspace/signal-attachments';
+
+  // Signal-cli attachment IDs often already include the extension
+  // (e.g., "S7C2cqUt2pvWMToh2XVo.jpg"). Don't add another extension.
+  const hasExtension = /\.[a-zA-Z0-9]+$/.test(attachmentId);
+  if (hasExtension) {
+    return `${signalAttachDir}/${attachmentId}`;
+  }
+
+  // If no extension in the ID, add one from MIME type
   const extMap: Record<string, string> = {
     'image/jpeg': '.jpg',
     'image/png': '.png',
@@ -228,12 +238,7 @@ function resolveSignalAttachment(
     'application/pdf': '.pdf',
   };
   const ext = mimeType && extMap[mimeType] ? extMap[mimeType] : '';
-
-  // The signal-cli attachments directory is mounted at /workspace/signal-attachments
-  const signalAttachDir = '/workspace/signal-attachments';
-  const filePath = `${signalAttachDir}/${attachmentId}${ext}`;
-  // Note: The file might not have an extension in the mount, return the ID path
-  return ext ? filePath : `${signalAttachDir}/${attachmentId}`;
+  return `${signalAttachDir}/${attachmentId}${ext}`;
 }
 
 // ---------- channel implementation ----------
