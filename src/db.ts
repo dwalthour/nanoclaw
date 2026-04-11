@@ -5,6 +5,7 @@ import path from 'path';
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { createFolderStateTable } from './folder-state.js';
 import {
   NewMessage,
   RegisteredGroup,
@@ -212,6 +213,9 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* column already exists */
   }
+
+  // Create folder_state table for centralized per-folder state
+  createFolderStateTable(database);
 }
 
 export function initDatabase(): void {
@@ -223,6 +227,13 @@ export function initDatabase(): void {
 
   // Migrate from JSON files if they exist
   migrateJsonState();
+}
+
+/** Returns the active database instance. Must be called after initDatabase(). */
+export function getDatabase(): Database.Database {
+  if (!db)
+    throw new Error('Database not initialized — call initDatabase() first');
+  return db;
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
