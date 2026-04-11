@@ -55,6 +55,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllUnifiedSessionIds,
+  getDatabase,
   setUnifiedSessionId,
   deleteSession,
   getAllTasks,
@@ -70,6 +71,10 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import {
+  FolderStateStore,
+  populateFolderStateFromGroups,
+} from './folder-state.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
@@ -132,6 +137,8 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+// Centralized per-folder state — initialized in main() after DB init
+let folderState: FolderStateStore;
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -225,6 +232,9 @@ async function executeModelSwitch(
       setRegisteredGroup(siblingJid, sibling);
     }
   }
+
+  // Dual-write: update centralized folder state (canonical source of truth)
+  folderState.setContainerConfig(group.folder, updatedConfig);
 
   const modelDisplay =
     provider === 'ollama'
@@ -362,6 +372,8 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
+  // Ensure centralized folder state exists for this group
+  folderState.ensureFolder(group.folder, jid);
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
@@ -537,6 +549,7 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     ) {
       activeJid = msg.chat_jid;
       setRouterState(activeJidKey, activeJid);
+      folderState.setActiveChannel(groupFolder, activeJid); // dual-write
       debugLog('SWITCHED active channel', {
         group: group.name,
         newChannel: msgChannel.name,
@@ -555,6 +568,7 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     const lastMessage = missedMessages[missedMessages.length - 1];
     activeJid = lastMessage.chat_jid;
     setRouterState(activeJidKey, activeJid);
+    folderState.setActiveChannel(groupFolder, activeJid); // dual-write
     debugLog('First time setting active channel', {
       group: group.name,
       activeJid,
@@ -1431,6 +1445,7 @@ async function startMessageLoop(): Promise<void> {
                   'Piped message from different channel, switching',
                 );
                 setRouterState(activeJidKey, msg.chat_jid);
+                folderState.setActiveChannel(groupFolder, msg.chat_jid); // dual-write
                 break; // Only switch once per bundle
               }
             }
@@ -1510,6 +1525,10 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+
+  // Initialize centralized folder state store
+  folderState = new FolderStateStore(getDatabase());
+  populateFolderStateFromGroups(getDatabase(), registeredGroups);
 
   // Ensure OneCLI agents exist for all registered groups.
   // Recovers from missed creates (e.g. OneCLI was down at registration time).
