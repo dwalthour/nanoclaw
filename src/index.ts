@@ -996,6 +996,22 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
     }
   }
 
+  if (output === 'permanent_error') {
+    // Permanent error — retrying won't help. Notify the user and advance cursor.
+    logger.error(
+      { group: group.name },
+      'Permanent error detected, notifying user (no retry)',
+    );
+    const { jid: activeJid, channel: activeChannel } = getActiveChannel();
+    if (activeChannel) {
+      await activeChannel.sendMessage(
+        activeJid,
+        `⚠️ Error: the current model can't handle this request (e.g. vision not supported). Try switching models with /model.`,
+      );
+    }
+    return true; // Don't retry — advance cursor
+  }
+
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
@@ -1021,12 +1037,31 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   return true;
 }
 
+// Patterns that indicate a permanent error — retrying won't help.
+// These are checked against container error messages (stderr + exit info).
+const PERMANENT_ERROR_PATTERNS = [
+  /model does not support image input/i,
+  /model does not support (?:vision|tool|function)/i,
+  /unsupported model/i,
+  /model.*not found/i,
+  /invalid model/i,
+  /API key.*invalid/i,
+  /authentication.*failed/i,
+  /unauthorized/i,
+  /403 Forbidden/i,
+];
+
+function isPermanentError(errorMessage: string | undefined): boolean {
+  if (!errorMessage) return false;
+  return PERMANENT_ERROR_PATTERNS.some((pattern) => pattern.test(errorMessage));
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<'success' | 'error'> {
+): Promise<'success' | 'error' | 'permanent_error'> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder] || undefined;
 
@@ -1183,6 +1218,14 @@ async function runAgent(
         );
         delete sessions[group.folder];
         deleteSession(group.folder);
+      }
+
+      if (isPermanentError(output.error)) {
+        logger.error(
+          { group: group.name, error: output.error },
+          'Permanent container error — will not retry',
+        );
+        return 'permanent_error';
       }
 
       logger.error(
