@@ -9,9 +9,6 @@
 
 import http from 'node:http';
 import https from 'node:https';
-import path from 'node:path';
-import fs from 'node:fs';
-import os from 'node:os';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -21,7 +18,6 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
-import { resolveGroupFolderPath } from '../group-folder.js';
 
 /** Delay before reconnecting SSE after disconnect (ms). */
 const SSE_RECONNECT_DELAY = 3000;
@@ -212,33 +208,15 @@ interface SignalDataMessage {
 }
 
 /**
- * Copy a Signal attachment from signal-cli's attachment directory
- * to the group's attachments directory.
- * Returns the container-relative path (e.g. /workspace/group/attachments/photo_123.jpg)
- * or null if the copy fails.
+ * Resolve a Signal attachment ID to the container-accessible path.
+ * Signal-cli downloads attachments to ~/.local/share/signal-cli/attachments/
+ * which is mounted at /workspace/signal-attachments/ in the container.
  */
-function copySignalAttachment(
+function resolveSignalAttachment(
   attachmentId: string,
-  groupFolder: string,
   mimeType?: string,
 ): string | null {
-  // signal-cli stores attachments in ~/.local/share/signal-cli/attachments/
-  const signalAttachDir = path.join(
-    os.homedir(),
-    '.local/share/signal-cli/attachments',
-  );
-  const srcPath = path.join(signalAttachDir, attachmentId);
-
-  if (!fs.existsSync(srcPath)) {
-    logger.warn({ attachmentId, srcPath }, 'Signal attachment not found');
-    return null;
-  }
-
-  const groupDir = resolveGroupFolderPath(groupFolder);
-  const attachDir = path.join(groupDir, 'attachments');
-  fs.mkdirSync(attachDir, { recursive: true });
-
-  // Determine extension from mime type
+  // Extension from MIME type
   const extMap: Record<string, string> = {
     'image/jpeg': '.jpg',
     'image/png': '.png',
@@ -249,18 +227,13 @@ function copySignalAttachment(
     'audio/mpeg': '.mp3',
     'application/pdf': '.pdf',
   };
-  const ext = mimeType ? extMap[mimeType] || '' : '';
-  const finalName = `${attachmentId}${ext}`;
-  const destPath = path.join(attachDir, finalName);
+  const ext = mimeType && extMap[mimeType] ? extMap[mimeType] : '';
 
-  try {
-    fs.copyFileSync(srcPath, destPath);
-    logger.info({ attachmentId, dest: destPath }, 'Signal attachment copied');
-    return `/workspace/group/attachments/${finalName}`;
-  } catch (err) {
-    logger.error({ attachmentId, err }, 'Failed to copy Signal attachment');
-    return null;
-  }
+  // The signal-cli attachments directory is mounted at /workspace/signal-attachments
+  const signalAttachDir = '/workspace/signal-attachments';
+  const filePath = `${signalAttachDir}/${attachmentId}${ext}`;
+  // Note: The file might not have an extension in the mount, return the ID path
+  return ext ? filePath : `${signalAttachDir}/${attachmentId}`;
 }
 
 // ---------- channel implementation ----------
@@ -648,15 +621,11 @@ export class SignalChannel implements Channel {
       return;
     }
 
-    // Download attachments if present
+    // Resolve Signal attachments to container-accessible paths
     const attachments = dm.attachments
       ?.map((att) => {
         if (!att.id) return null;
-        const filePath = copySignalAttachment(
-          att.id,
-          group.folder,
-          att.contentType,
-        );
+        const filePath = resolveSignalAttachment(att.id, att.contentType);
         if (!filePath) return null;
         return {
           type: this.inferAttachmentType(att.contentType),

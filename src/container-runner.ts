@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -204,6 +205,19 @@ function buildVolumeMounts(
     containerPath: '/home/node/.claude',
     readonly: false,
   });
+
+  // Mount signal-cli attachments directory for Signal image reception
+  const signalAttachDir = path.join(
+    os.homedir(),
+    '.local/share/signal-cli/attachments',
+  );
+  if (fs.existsSync(signalAttachDir)) {
+    mounts.push({
+      hostPath: signalAttachDir,
+      containerPath: '/workspace/signal-attachments',
+      readonly: true,
+    });
+  }
 
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
