@@ -207,6 +207,38 @@ interface SignalDataMessage {
   };
 }
 
+/**
+ * Resolve a Signal attachment ID to the container-accessible path.
+ * Signal-cli downloads attachments to ~/.local/share/signal-cli/attachments/
+ * which is mounted at /workspace/signal-attachments/ in the container.
+ */
+function resolveSignalAttachment(
+  attachmentId: string,
+  mimeType?: string,
+): string | null {
+  // Extension from MIME type
+  const extMap: Record<string, string> = {
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'video/mp4': '.mp4',
+    'audio/mp4': '.m4a',
+    'audio/mpeg': '.mp3',
+    'application/pdf': '.pdf',
+  };
+  const ext = mimeType && extMap[mimeType] ? extMap[mimeType] : '';
+
+  // Check if file exists in mounted directory
+  const signalAttachDir = '/workspace/signal-attachments';
+  const filePath = `${signalAttachDir}/${attachmentId}${ext}`;
+  // Note: The file might not have an extension in the mount, check both
+  const altPath = `${signalAttachDir}/${attachmentId}`;
+
+  // Return the path with extension if we can determine it
+  return ext ? filePath : altPath;
+}
+
 // ---------- channel implementation ----------
 
 export class SignalChannel implements Channel {
@@ -592,12 +624,19 @@ export class SignalChannel implements Channel {
       return;
     }
 
-    // Download attachments if present
-    const attachments = dm.attachments?.map((att) => ({
-      type: this.inferAttachmentType(att.contentType),
-      path: att.id || '',
-      mimeType: att.contentType,
-    }));
+    // Resolve Signal attachments to container-accessible paths
+    const attachments = dm.attachments
+      ?.map((att) => {
+        if (!att.id) return null;
+        const filePath = resolveSignalAttachment(att.id, att.contentType);
+        if (!filePath) return null;
+        return {
+          type: this.inferAttachmentType(att.contentType),
+          path: filePath,
+          mimeType: att.contentType,
+        };
+      })
+      .filter((a): a is NonNullable<typeof a> => a !== null);
 
     // Deliver message — startMessageLoop() will pick it up
     this.opts.onMessage(chatJid, {
