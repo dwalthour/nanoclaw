@@ -5,8 +5,8 @@
 OUTPUT_DIR="/home/dwalt/workspace/nanoclaw/data/host-logs"
 mkdir -p "$OUTPUT_DIR"
 
-# Recent journal (last 30 minutes)
-journalctl --since "30 min ago" --no-pager --output=short-iso > "$OUTPUT_DIR/journal-recent.log" 2>&1
+# Recent journal (last 3 hours)
+journalctl --since "3 hours ago" --no-pager --output=short-iso > "$OUTPUT_DIR/journal-recent.log" 2>&1
 
 # Failed units
 systemctl --failed --no-pager > "$OUTPUT_DIR/failed-units.log" 2>&1
