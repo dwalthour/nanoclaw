@@ -114,10 +114,11 @@ let sessions: Record<string, string> = {};
 let unifiedSessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 // Pending model switch notification to inject into the next prompt
+// Model switch notifications keyed by group folder
 const pendingModelNotification: Record<string, string> = {};
-// Groups that should force compaction on their next agent run
+// Groups that should force compaction on their next agent run (keyed by group folder)
 const pendingForceCompact: Set<string> = new Set();
-// Self-initiated model switches queued from container output
+// Self-initiated model switches queued from container output (keyed by group folder)
 const pendingSelfModelSwitch: Record<
   string,
   { provider: 'claude' | 'ollama'; model?: string; reason?: string }
@@ -235,7 +236,7 @@ async function executeModelSwitch(
       : `claude/${modelName || 'default'}`;
 
   // Queue a notification for the next prompt so the agent knows about the switch
-  pendingModelNotification[chatJid] =
+  pendingModelNotification[group.folder] =
     `[SYSTEM NOTIFICATION — Model switch has occurred. You are now running on ${modelDisplay}. This message was injected automatically by the NanoClaw infrastructure, not sent by a user.]`;
 
   if (channel) {
@@ -935,18 +936,18 @@ async function processGroupMessages(groupFolder: string): Promise<boolean> {
   await primaryChannel?.setTyping?.(primaryJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
-  // Process self-initiated model switch requests
-  for (const jid of jids) {
-    const switchRequest = pendingSelfModelSwitch[jid];
-    if (switchRequest) {
-      delete pendingSelfModelSwitch[jid];
-      await executeModelSwitch(
-        jid,
-        switchRequest.provider,
-        switchRequest.model,
-      );
-      break; // Only process one switch per group
-    }
+  // Process self-initiated model switch requests (keyed by group folder)
+  const selfSwitchRequest = pendingSelfModelSwitch[groupFolder];
+  if (selfSwitchRequest) {
+    delete pendingSelfModelSwitch[groupFolder];
+    // Use the active JID for this group folder (from FolderStateStore)
+    const switchState = folderState.get(groupFolder);
+    const switchJid = switchState?.activeChannelJid || primaryJid;
+    await executeModelSwitch(
+      switchJid,
+      selfSwitchRequest.provider,
+      selfSwitchRequest.model,
+    );
   }
 
   // Process IPC-requested model switches (keyed by group folder)
@@ -1121,16 +1122,16 @@ async function runAgent(
 
   // Inject pending model switch notification into the prompt
   let finalPrompt = prompt;
-  if (pendingModelNotification[chatJid]) {
+  if (pendingModelNotification[group.folder]) {
     logger.info(
       {
         group: group.name,
-        notification: pendingModelNotification[chatJid].slice(0, 80),
+        notification: pendingModelNotification[group.folder].slice(0, 80),
       },
       'Injecting model switch notification',
     );
-    finalPrompt = `${pendingModelNotification[chatJid]}\n\n${prompt}`;
-    delete pendingModelNotification[chatJid];
+    finalPrompt = `${pendingModelNotification[group.folder]}\n\n${prompt}`;
+    delete pendingModelNotification[group.folder];
   }
 
   // If there's a pending prompt (from IPC model_switch), use it instead
@@ -1139,9 +1140,9 @@ async function runAgent(
   }
 
   // Consume the force-compact flag if set
-  const forceCompact = pendingForceCompact.has(chatJid);
+  const forceCompact = pendingForceCompact.has(group.folder);
   if (forceCompact) {
-    pendingForceCompact.delete(chatJid);
+    pendingForceCompact.delete(group.folder);
   }
 
   // Read config from FolderStateStore (canonical source) for container spawn
@@ -1194,7 +1195,7 @@ async function runAgent(
         },
         'Container requested model switch',
       );
-      pendingSelfModelSwitch[chatJid] = { provider, model, reason };
+      pendingSelfModelSwitch[group.folder] = { provider, model, reason };
     }
 
     if (output.status === 'error') {
