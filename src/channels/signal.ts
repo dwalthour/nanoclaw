@@ -22,6 +22,10 @@ import {
 /** Delay before reconnecting SSE after disconnect (ms). */
 const SSE_RECONNECT_DELAY = 3000;
 
+/** Max retries for initial Signal daemon connection (covers JVM warm-up on boot). */
+const CONNECT_MAX_RETRIES = 15;
+const CONNECT_RETRY_DELAY_MS = 2000;
+
 /** Signal has no hard limit, but keep chunks reasonable. */
 const SIGNAL_MAX_MESSAGE_LENGTH = 4000;
 
@@ -331,26 +335,43 @@ export class SignalChannel implements Channel {
   // ---- Channel interface ----
 
   async connect(): Promise<void> {
-    try {
-      // Verify daemon is reachable — listGroups is a safe probe
-      await this.rpc('listGroups', {});
-      this.connected = true;
-      logger.info(
-        { account: this.account, url: this.baseUrl },
-        'Signal channel connected',
-      );
-      console.log(`\n  Signal: ${this.account}`);
-      console.log(`  Daemon: ${this.baseUrl}\n`);
+    for (let attempt = 1; attempt <= CONNECT_MAX_RETRIES; attempt++) {
+      try {
+        // Verify daemon is reachable — listGroups is a safe probe
+        await this.rpc('listGroups', {});
+        this.connected = true;
+        logger.info(
+          { account: this.account, url: this.baseUrl, attempt },
+          'Signal channel connected',
+        );
+        console.log(`\n  Signal: ${this.account}`);
+        console.log(`  Daemon: ${this.baseUrl}\n`);
 
-      this.startSSE();
-    } catch (err) {
-      // Don't throw — let NanoClaw start without Signal if daemon isn't running.
-      // This mirrors Telegram's pattern: disabled if creds missing.
-      logger.warn(
-        { account: this.account, url: this.baseUrl, err },
-        'Signal: cannot reach signal-cli daemon (channel disabled)',
-      );
-      this.connected = false;
+        this.startSSE();
+        return; // connected, done
+      } catch (err) {
+        if (attempt < CONNECT_MAX_RETRIES) {
+          logger.info(
+            {
+              account: this.account,
+              url: this.baseUrl,
+              attempt,
+              maxRetries: CONNECT_MAX_RETRIES,
+            },
+            'Signal: daemon not reachable yet, retrying...',
+          );
+          await new Promise((resolve) =>
+            setTimeout(resolve, CONNECT_RETRY_DELAY_MS),
+          );
+        } else {
+          // All retries exhausted — disable the channel (same as previous behavior)
+          logger.warn(
+            { account: this.account, url: this.baseUrl, attempt, err },
+            'Signal: cannot reach signal-cli daemon after all retries (channel disabled)',
+          );
+          this.connected = false;
+        }
+      }
     }
   }
 
