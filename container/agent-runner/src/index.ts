@@ -510,6 +510,7 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
+  let lastLoggedAnthropicMessageId: string | undefined;
   let streamAccumulated = '';
   let streamLastEmitTime = 0;
   let streamLastEmitLen = 0;
@@ -616,9 +617,14 @@ async function runQuery(
       // Capture per-API-call usage from the underlying Anthropic Message.
       // Critical for diagnosing prompt-cache effectiveness: compare
       // cache_read_input_tokens vs cache_creation_input_tokens vs input_tokens.
+      // The SDK emits multiple SDKAssistantMessage events per Anthropic API
+      // call (each event has a fresh SDK-level uuid but they all wrap the same
+      // underlying BetaMessage with the same usage snapshot). Dedupe by the
+      // Anthropic message.id so we log each real API call exactly once.
       const assistantUsage = (
         message as {
           message?: {
+            id?: string;
             usage?: {
               input_tokens?: number;
               output_tokens?: number;
@@ -630,10 +636,17 @@ async function runQuery(
           };
         }
       ).message;
-      if (assistantUsage?.usage) {
+      const anthropicMessageId = assistantUsage?.id;
+      if (
+        assistantUsage?.usage &&
+        anthropicMessageId &&
+        anthropicMessageId !== lastLoggedAnthropicMessageId
+      ) {
+        lastLoggedAnthropicMessageId = anthropicMessageId;
         const u = assistantUsage.usage;
         logUsage('assistant', containerInput, {
           assistantUuid: lastAssistantUuid,
+          anthropicMessageId,
           model: assistantUsage.model,
           input_tokens: u.input_tokens ?? 0,
           output_tokens: u.output_tokens ?? 0,
