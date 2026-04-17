@@ -166,6 +166,38 @@ export function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
+const USAGE_LOG_DIR = '/workspace/group/logs';
+const USAGE_LOG_PATH = `${USAGE_LOG_DIR}/usage.jsonl`;
+
+/**
+ * Log token usage for diagnosing prompt-cache effectiveness and per-call cost.
+ * Writes a one-line summary to stderr and appends a structured JSON record
+ * to /workspace/group/logs/usage.jsonl for offline analysis.
+ */
+export function logUsage(
+  context: 'assistant' | 'result',
+  containerInput: { chatJid?: string; groupFolder?: string; claudeModel?: string },
+  data: Record<string, unknown>,
+): void {
+  const entry = {
+    ts: new Date().toISOString(),
+    context,
+    chatJid: containerInput.chatJid,
+    groupFolder: containerInput.groupFolder,
+    model: containerInput.claudeModel,
+    ...data,
+  };
+  log(`USAGE [${context}] ${JSON.stringify(data)}`);
+  try {
+    fs.mkdirSync(USAGE_LOG_DIR, { recursive: true });
+    fs.appendFileSync(USAGE_LOG_PATH, JSON.stringify(entry) + '\n');
+  } catch (err) {
+    log(
+      `Failed to write usage log: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 function getSessionSummary(
   sessionId: string,
   transcriptPath: string,
@@ -581,6 +613,36 @@ async function runQuery(
       // Reset streaming accumulator for each new assistant turn
       streamAccumulated = '';
 
+      // Capture per-API-call usage from the underlying Anthropic Message.
+      // Critical for diagnosing prompt-cache effectiveness: compare
+      // cache_read_input_tokens vs cache_creation_input_tokens vs input_tokens.
+      const assistantUsage = (
+        message as {
+          message?: {
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_read_input_tokens?: number;
+              cache_creation_input_tokens?: number;
+              cache_creation?: Record<string, number>;
+            };
+            model?: string;
+          };
+        }
+      ).message;
+      if (assistantUsage?.usage) {
+        const u = assistantUsage.usage;
+        logUsage('assistant', containerInput, {
+          assistantUuid: lastAssistantUuid,
+          model: assistantUsage.model,
+          input_tokens: u.input_tokens ?? 0,
+          output_tokens: u.output_tokens ?? 0,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
+          cache_creation: u.cache_creation,
+        });
+      }
+
       // Emit tool_use blocks as tooling signals so the user sees what Claude is doing
       const assistantContent = (
         message as {
@@ -673,6 +735,42 @@ async function runQuery(
       log(
         `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
       );
+
+      // Capture aggregated usage and cost for the full result round.
+      const resultMeta = message as {
+        subtype?: string;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+        modelUsage?: Record<
+          string,
+          {
+            inputTokens?: number;
+            outputTokens?: number;
+            cacheReadInputTokens?: number;
+            cacheCreationInputTokens?: number;
+            costUSD?: number;
+            contextWindow?: number;
+          }
+        >;
+        total_cost_usd?: number;
+        duration_ms?: number;
+        duration_api_ms?: number;
+        num_turns?: number;
+      };
+      logUsage('result', containerInput, {
+        resultIndex: resultCount,
+        subtype: resultMeta.subtype,
+        total_cost_usd: resultMeta.total_cost_usd,
+        duration_ms: resultMeta.duration_ms,
+        duration_api_ms: resultMeta.duration_api_ms,
+        num_turns: resultMeta.num_turns,
+        usage: resultMeta.usage,
+        modelUsage: resultMeta.modelUsage,
+      });
 
       // Capture the final result text in the unified session — this is the
       // actual response sent to the user, not the intermediate assistant messages.
