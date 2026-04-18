@@ -151,11 +151,12 @@ async function executeModelSwitch(
   chatJid: string,
   provider: 'claude' | 'ollama',
   modelName?: string,
+  opts: { silent?: boolean } = {},
 ): Promise<void> {
   const group = registeredGroups[chatJid];
   if (!group) return;
 
-  const channel = findChannel(channels, chatJid);
+  const channel = opts.silent ? null : findChannel(channels, chatJid);
 
   // Validate Ollama model exists before committing to the switch
   if (provider === 'ollama' && modelName) {
@@ -1950,6 +1951,8 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
+    switchModel: (jid, provider, modelName, opts) =>
+      executeModelSwitch(jid, provider, modelName, opts),
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
