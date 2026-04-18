@@ -62,6 +62,16 @@ export const HEARTBEAT_INTERVAL = parseInt(
   process.env.HEARTBEAT_INTERVAL || '1800000',
   10,
 ); // 30min default
+// If a direct (non-heartbeat) message arrived this recently, skip the
+// upcoming heartbeat — the user is actively engaged.
+export const HEARTBEAT_QUIET_PERIOD_MS = parseInt(
+  process.env.HEARTBEAT_QUIET_PERIOD_MS || '3600000',
+  10,
+); // 60min default
+// Ollama model to auto-switch to when a heartbeat fires while on a Claude
+// model. Heartbeats don't need premium reasoning, and Ollama usage is cheap.
+export const HEARTBEAT_OLLAMA_MODEL =
+  process.env.HEARTBEAT_OLLAMA_MODEL || 'glm-5.1:cloud';
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,

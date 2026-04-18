@@ -7,6 +7,8 @@ import {
   ASSISTANT_NAME,
   GROUPS_DIR,
   HEARTBEAT_INTERVAL,
+  HEARTBEAT_OLLAMA_MODEL,
+  HEARTBEAT_QUIET_PERIOD_MS,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -83,6 +85,18 @@ export interface SchedulerDependencies {
     containerName: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  /**
+   * Switch the model provider/model for a JID's folder. Used by the heartbeat
+   * loop to downshift to a cheap Ollama model before firing a heartbeat while
+   * the folder is on a premium Claude model. `opts.silent` suppresses the
+   * user-visible channel notification.
+   */
+  switchModel: (
+    jid: string,
+    provider: 'claude' | 'ollama',
+    modelName?: string,
+    opts?: { silent?: boolean },
+  ) => Promise<void>;
 }
 
 async function runTask(
@@ -276,7 +290,6 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   // Track last heartbeat time per group (init to now so we don't fire on startup)
   const lastHeartbeat: Record<string, number> = {};
   const startupTime = Date.now();
-  const HEARTBEAT_QUIET_PERIOD_MS = 300_000; // 5 minutes
 
   const checkHeartbeats = async () => {
     const groups = deps.registeredGroups();
@@ -321,6 +334,28 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       }
 
       lastHeartbeat[folder] = now;
+
+      // Downshift to a cheap Ollama model before firing the heartbeat if the
+      // folder is currently on a Claude model. Heartbeats are frequent and
+      // don't need premium reasoning; Ollama usage is effectively free by
+      // comparison. Dave can manually `/model` back to Claude when he wants.
+      const currentProvider = group.containerConfig?.modelProvider || 'claude';
+      if (currentProvider === 'claude') {
+        try {
+          await deps.switchModel(activeJid, 'ollama', HEARTBEAT_OLLAMA_MODEL, {
+            silent: true,
+          });
+          logger.info(
+            { group: group.name, folder, model: HEARTBEAT_OLLAMA_MODEL },
+            'Heartbeat auto-switched from Claude to Ollama',
+          );
+        } catch (err) {
+          logger.error(
+            { err, group: group.name, folder },
+            'Heartbeat auto-switch failed, proceeding on current model',
+          );
+        }
+      }
 
       try {
         const heartbeatContent = fs.readFileSync(heartbeatPath, 'utf-8').trim();
