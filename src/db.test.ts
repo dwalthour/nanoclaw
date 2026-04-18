@@ -7,6 +7,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
+  getLastMessageTimestamp,
   getMessagesSince,
   getNewMessages,
   getTaskById,
@@ -636,7 +637,7 @@ describe('registered group isMain', () => {
     expect(group.folder).toBe('whatsapp_main');
   });
 
-  it('omits isMain for non-main groups', () => {
+  it('omit isMain for non-main groups', () => {
     setRegisteredGroup('group@g.us', {
       name: 'Family Chat',
       folder: 'whatsapp_family-chat',
@@ -648,5 +649,50 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+
+  it('getLastMessageTimestamp with userOnly excludes system and bot messages', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    // User message at T=10
+    store({
+      id: 'msg-user',
+      chat_jid: 'group@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'Dave',
+      content: 'hello from user',
+      timestamp: '2024-01-01T00:00:10.000Z',
+      is_from_me: false,
+    });
+
+    // System heartbeat at T=20
+    store({
+      id: 'msg-system',
+      chat_jid: 'group@g.us',
+      sender: '[System]',
+      sender_name: '[System]',
+      content: '[HEARTBEAT]',
+      timestamp: '2024-01-01T00:00:20.000Z',
+      is_from_me: false,
+    });
+
+    // Bot response at T=30
+    store({
+      id: 'msg-bot',
+      chat_jid: 'group@g.us',
+      sender: 'bot',
+      sender_name: 'Elara',
+      content: 'all clear',
+      timestamp: '2024-01-01T00:00:30.000Z',
+      is_from_me: true,
+    });
+
+    // Without userOnly: returns latest of all messages (bot at T=30)
+    const allTs = getLastMessageTimestamp('group@g.us');
+    expect(allTs).toBe('2024-01-01T00:00:30.000Z');
+
+    // With userOnly: returns only the user message (T=10), ignoring system and bot
+    const userTs = getLastMessageTimestamp('group@g.us', { userOnly: true });
+    expect(userTs).toBe('2024-01-01T00:00:10.000Z');
   });
 });

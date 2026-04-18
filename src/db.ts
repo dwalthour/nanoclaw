@@ -503,7 +503,18 @@ export function getLastBotMessageTimestamp(
   return row?.ts ?? undefined;
 }
 
-export function getLastMessageTimestamp(chatJid: string): string | undefined {
+export function getLastMessageTimestamp(
+  chatJid: string,
+  { userOnly = false }: { userOnly?: boolean } = {},
+): string | undefined {
+  if (userOnly) {
+    const row = db
+      .prepare(
+        'SELECT MAX(timestamp) as ts FROM messages WHERE chat_jid = ? AND is_from_me = 0 AND sender != ?',
+      )
+      .get(chatJid, '[System]') as { ts: string | null } | undefined;
+    return row?.ts ?? undefined;
+  }
   const row = db
     .prepare('SELECT MAX(timestamp) as ts FROM messages WHERE chat_jid = ?')
     .get(chatJid) as { ts: string | null } | undefined;

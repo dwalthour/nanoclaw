@@ -320,8 +320,8 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
       const activeJidKey = `active_jid:${folder}`;
       const activeJid = getRouterState(activeJidKey) || jids[0];
 
-      // Skip if there has been recent direct interaction
-      const lastMsg = getLastMessageTimestamp(activeJid);
+      // Skip if there has been recent direct interaction (user messages only, not heartbeats/bot)
+      const lastMsg = getLastMessageTimestamp(activeJid, { userOnly: true });
       if (lastMsg) {
         const lastMsgAge = now - new Date(lastMsg).getTime();
         if (lastMsgAge < HEARTBEAT_QUIET_PERIOD_MS) {
