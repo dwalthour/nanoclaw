@@ -361,7 +361,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         const heartbeatContent = fs.readFileSync(heartbeatPath, 'utf-8').trim();
         if (!heartbeatContent) continue;
 
-        const prompt = `[HEARTBEAT — This is an automated periodic check-in, not a user message.]\n\nYou MUST respond ONLY in English. Never use Chinese or any other language. All output must be in English.\n\n${heartbeatContent}`;
+        const prompt = `[HEARTBEAT — This is an automated periodic check-in, not a user message.]\n\nYou MUST respond ONLY in English. Never use Chinese or any other language. All output must be in English.\n\n${heartbeatContent}\n\nStart your response with: All`;
 
         // Try to pipe into the active container first
         if (deps.queue.sendMessage(activeJid, prompt)) {
