@@ -71,7 +71,7 @@ export const HEARTBEAT_QUIET_PERIOD_MS = parseInt(
 // Ollama model to auto-switch to when a heartbeat fires while on a Claude
 // model. Heartbeats don't need premium reasoning, and Ollama usage is cheap.
 export const HEARTBEAT_OLLAMA_MODEL =
-  process.env.HEARTBEAT_OLLAMA_MODEL || 'glm-5.1:cloud';
+  process.env.HEARTBEAT_OLLAMA_MODEL || 'glm-5:cloud';
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
